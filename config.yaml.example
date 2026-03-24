@@ -1,0 +1,83 @@
+# claude-pipeline 設定ファイル
+# コピーして config.yaml として使用してください
+# cp config.yaml.example config.yaml
+
+global:
+  # ポーリング間隔（秒）
+  poll_interval: 300
+
+  # Issue のトリガーラベル
+  trigger_label: "auto-implement"
+
+  # 処理完了時に付けるラベル
+  done_label: "auto-implemented"
+
+  # 失敗時に付けるラベル
+  failed_label: "auto-implement-failed"
+
+  # 同時実行ジョブ数の上限
+  max_concurrent_jobs: 3
+
+  # 作業ディレクトリ（相対パス）
+  workspace_dir: "./workspace"
+
+  # ログディレクトリ（相対パス）
+  log_dir: "./logs"
+
+  # ログ保持日数
+  log_retention_days: 30
+
+  # Discord 通知設定
+  discord:
+    # 環境変数名（.env で設定）
+    webhook_url_env: "DISCORD_WEBHOOK_URL"
+    # 通知タイミング: success, failure, start
+    notify_on:
+      - "success"
+      - "failure"
+
+  # Claude Code 設定
+  claude:
+    # API キーの環境変数名
+    api_key_env: "ANTHROPIC_API_KEY"
+    # デフォルトモデル
+    # 優先順位: パイプラインyamlのステップ固有 > .env CLAUDE_MODEL_<STEP> > リポジトリ固有 > .env CLAUDE_MODEL > ここのグローバル設定
+    model: "claude-sonnet-4-6"
+
+  # GitHub 設定
+  github:
+    # トークンの環境変数名
+    token_env: "GITHUB_TOKEN"
+
+  # スキル自動発見設定
+  skill_discovery:
+    # 動的スキル発見を有効にするか
+    enabled: true
+    # キャッシュ有効期間（秒） 7日 = 604800
+    cache_ttl: 604800
+    # リポジトリあたりの最大スキル数
+    max_skills_per_repo: 5
+    # 最低インストール数（信頼性フィルタ）
+    min_installs: 1000
+    # 信頼できるソース
+    trusted_sources:
+      - "vercel-labs"
+      - "anthropics"
+      - "microsoft"
+    # スキル自動更新
+    auto_update: true
+
+# 管理対象リポジトリ
+repositories: []
+  # 例:
+  # - name: "my-next-app"
+  #   repo: "yourname/my-next-app"
+  #   pipeline: "default"
+  #   branch_prefix: "feat/"
+  #   base_branch: "main"
+  #   status: "active"
+  #   claude_model: ""              # 空欄ならグローバル設定を使用
+  #   pinned_skills: []             # 常に適用するスキル
+  #   context: |                    # プロジェクト固有のコンテキスト
+  #     Next.js 15 App Router を使用。
+  #     Tailwind CSS + shadcn/ui でスタイリング。

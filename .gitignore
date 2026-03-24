@@ -1,0 +1,13 @@
+# 環境変数（秘密情報）
+.env
+
+# 実行時生成物
+workspace/
+logs/
+skills/cache/
+
+# 設定ファイル（各環境固有）
+config.yaml
+
+# Node.js
+web/node_modules/

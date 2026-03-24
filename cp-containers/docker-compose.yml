@@ -1,0 +1,53 @@
+services:
+  # パイプライン実行デーモン（ポーリング + ジョブ実行）
+  pipeline:
+    build:
+      context: ..
+      dockerfile: cp-containers/pipeline.Dockerfile
+    container_name: cp-pipeline
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    volumes:
+      - ../config.yaml:/app/config.yaml
+      - ../.env:/app/.env
+      - ../pipelines:/app/pipelines
+      - ../workspace:/app/workspace
+      - ../logs:/app/logs
+      - ../skills:/app/skills
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-}
+      - CLAUDE_MODEL_IMPLEMENT=${CLAUDE_MODEL_IMPLEMENT:-}
+      - CLAUDE_MODEL_REVIEW=${CLAUDE_MODEL_REVIEW:-}
+      - CLAUDE_MODEL_TEST=${CLAUDE_MODEL_TEST:-}
+      - CLAUDE_MODEL_DOCS=${CLAUDE_MODEL_DOCS:-}
+      - GIT_AUTHOR_NAME=claude-pipeline
+      - GIT_AUTHOR_EMAIL=claude-pipeline@example.com
+      - GIT_COMMITTER_NAME=claude-pipeline
+      - GIT_COMMITTER_EMAIL=claude-pipeline@example.com
+
+  # Web 管理UI
+  web:
+    build:
+      context: ..
+      dockerfile: web/Dockerfile
+    container_name: cp-web
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../config.yaml:/app/config.yaml
+      - ../workspace:/app/workspace
+      - ../logs:/app/logs
+      - ../daemon:/app/daemon
+      - ../scripts:/app/scripts
+      - ../pipelines:/app/pipelines
+    environment:
+      - PORT=3000
+      - BASE_DIR=/app
+      - GITHUB_TOKEN=${GITHUB_TOKEN}

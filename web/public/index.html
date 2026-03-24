@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>claude-pipeline</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <h1><span>claude</span>-pipeline</h1>
+  <button class="btn btn-sm" onclick="Actions.poll()">手動ポーリング</button>
+</header>
+
+<div class="tabs">
+  <div class="tab active" data-tab="dashboard">ダッシュボード</div>
+  <div class="tab" data-tab="repos">リポジトリ</div>
+  <div class="tab" data-tab="settings">設定</div>
+  <div class="tab" data-tab="logs">ログ</div>
+</div>
+
+<main>
+  <!-- ダッシュボード -->
+  <div id="dashboard" class="section active">
+    <div class="status-grid" id="stat-cards"></div>
+
+    <div class="card">
+      <h2>実行中のジョブ</h2>
+      <div id="running-jobs"></div>
+    </div>
+
+    <div class="card">
+      <h2>キュー</h2>
+      <div id="queued-jobs"></div>
+    </div>
+
+    <div class="card">
+      <h2>最近の完了</h2>
+      <div id="completed-jobs"></div>
+    </div>
+  </div>
+
+  <!-- リポジトリ -->
+  <div id="repos" class="section">
+    <div class="card">
+      <h2>
+        登録リポジトリ
+        <button class="btn btn-primary btn-sm" onclick="RepoModal.open()">+ 追加</button>
+      </h2>
+      <div id="repos-table"></div>
+    </div>
+  </div>
+
+  <!-- 設定 -->
+  <div id="settings" class="section">
+    <div class="card">
+      <h2>グローバル設定</h2>
+      <form id="settings-form" onsubmit="Settings.save(event)">
+        <div class="settings-grid">
+          <div class="form-group">
+            <label>ポーリング間隔（秒）</label>
+            <input type="number" name="poll_interval" min="60" step="60">
+          </div>
+          <div class="form-group">
+            <label>同時実行ジョブ数</label>
+            <input type="number" name="max_concurrent_jobs" min="1" max="10">
+          </div>
+          <div class="form-group">
+            <label>トリガーラベル</label>
+            <input type="text" name="trigger_label">
+          </div>
+          <div class="form-group">
+            <label>ログ保持日数</label>
+            <input type="number" name="log_retention_days" min="1">
+          </div>
+          <div class="form-group">
+            <label>Claude モデル</label>
+            <select name="claude_model">
+              <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+              <option value="claude-opus-4-6">claude-opus-4-6</option>
+              <option value="claude-haiku-4-5-20251001">claude-haiku-4-5</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>スキル自動発見</label>
+            <select name="skill_discovery_enabled">
+              <option value="true">有効</option>
+              <option value="false">無効</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ログ -->
+  <div id="logs" class="section">
+    <div class="card">
+      <h2>ログビューア</h2>
+      <div style="display:flex;gap:12px;margin-bottom:16px;">
+        <div class="form-group" style="flex:1;margin:0;">
+          <select id="log-repo" onchange="Logs.loadFiles()">
+            <option value="">リポジトリを選択...</option>
+          </select>
+        </div>
+        <div class="form-group" style="flex:1;margin:0;">
+          <select id="log-file" onchange="Logs.loadContent()">
+            <option value="">ログファイルを選択...</option>
+          </select>
+        </div>
+      </div>
+      <div id="log-content" class="log-viewer">ログを選択してください</div>
+    </div>
+  </div>
+</main>
+
+<!-- リポジトリ追加/編集モーダル -->
+<div class="modal-overlay" id="repo-modal">
+  <div class="modal">
+    <h3 id="repo-modal-title">リポジトリを追加</h3>
+    <form id="repo-form" onsubmit="RepoModal.submit(event)">
+      <input type="hidden" name="edit_name">
+      <div class="form-group">
+        <label>リポジトリ (owner/repo)</label>
+        <input type="text" name="repo" placeholder="yourname/my-project" required>
+      </div>
+      <div class="form-group">
+        <label>パイプライン</label>
+        <input type="text" name="pipeline" value="default">
+      </div>
+      <div class="form-group">
+        <label>ブランチプレフィックス</label>
+        <input type="text" name="branch_prefix" value="feat/">
+      </div>
+      <div class="form-group">
+        <label>ベースブランチ</label>
+        <input type="text" name="base_branch" value="main">
+      </div>
+      <div class="form-group">
+        <label>コンテキスト（プロジェクト情報）</label>
+        <textarea name="context" placeholder="Next.js 15 + Tailwind CSS のプロジェクト"></textarea>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn" onclick="RepoModal.close()">キャンセル</button>
+        <button type="submit" class="btn btn-primary">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="toast" class="toast" style="display:none;"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

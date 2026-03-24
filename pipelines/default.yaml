@@ -1,0 +1,100 @@
+# デフォルトパイプライン定義
+# implement → review → test → docs の4ステップ
+
+name: "default"
+description: "標準的な実装パイプライン"
+
+steps:
+  - name: "implement"
+    description: "Issueの要件を実装"
+    # model: "claude-sonnet-4-6"  # 省略時はグローバル/リポジトリ設定を使用
+    prompt_template: |
+      あなたはソフトウェアエンジニアです。
+      以下のGitHub Issueの要件を実装してください。
+
+      ## Issue #{issue_number}: {issue_title}
+      {issue_body}
+
+      ## 指示
+      - まずリポジトリの構造とコードを読んで理解してください
+      - 既存のコーディングスタイル・規約に従ってください
+      - CLAUDE.md があればそのルールに従ってください
+      - 必要最小限の変更で実装してください
+      - 新規ファイルは必要な場合のみ作成してください
+      - セキュリティ脆弱性を作り込まないでください
+    commit_prefix: "feat"
+    allowed_tools: "Edit,Write,Bash,Glob,Grep,Read"
+    max_turns: 50
+
+  - name: "review"
+    description: "実装コードのセルフレビューと修正"
+    # model: "claude-opus-4-6"  # レビューは深い推論ができるモデル推奨
+    prompt_template: |
+      あなたはシニアコードレビュアーです。
+      以下の変更差分をレビューし、問題があれば修正してください。
+
+      ## レビュー対象（mainブランチからの差分）
+      ```
+      {git_diff_from_main}
+      ```
+
+      ## チェック項目
+      1. バグ・ロジックエラー
+      2. セキュリティ脆弱性（OWASP Top 10）
+      3. パフォーマンス問題
+      4. エッジケースの未処理
+      5. コーディング規約違反
+      6. 不要なコード・デバッグコードの残留
+
+      問題を見つけたら修正してください。
+      問題がなければ何もしないでください。
+    commit_prefix: "refactor"
+    allowed_tools: "Edit,Write,Bash,Glob,Grep,Read"
+    max_turns: 30
+    skip_if_no_changes: true
+
+  - name: "test"
+    description: "テストの作成と実行"
+    # model: "claude-sonnet-4-6"  # テスト生成は Sonnet で十分
+    prompt_template: |
+      あなたはテストエンジニアです。
+      以下の変更に対するテストを作成・実行してください。
+
+      ## 変更差分（mainブランチからの差分）
+      ```
+      {git_diff_from_main}
+      ```
+
+      ## 指示
+      - 既存のテストフレームワーク・テストパターンに従ってください
+      - テストフレームワークが存在しない場合は、言語に適したものをセットアップしてください
+      - 正常系・異常系・境界値をカバーしてください
+      - テストを実行して全てパスすることを確認してください
+      - テストが失敗したら修正してください
+    commit_prefix: "test"
+    allowed_tools: "Edit,Write,Bash,Glob,Grep,Read"
+    max_turns: 40
+    retry_on_test_failure: 3
+
+  - name: "docs"
+    description: "ドキュメントの更新"
+    # model: "claude-haiku-4-5"  # ドキュメント更新は軽量モデルで十分
+    prompt_template: |
+      以下の変更に伴い、ドキュメントの更新が必要か判断してください。
+
+      ## 変更差分（mainブランチからの差分）
+      ```
+      {git_diff_from_main}
+      ```
+
+      ## 判断基準
+      - 新しいAPIエンドポイントが追加された → API docsを更新
+      - 設定項目が追加された → READMEを更新
+      - 使い方が変わった → 関連ドキュメントを更新
+      - 上記に該当しない → 何もしない
+
+      必要な場合のみドキュメントを更新してください。
+    commit_prefix: "docs"
+    allowed_tools: "Edit,Write,Bash,Glob,Grep,Read"
+    max_turns: 20
+    skip_if_no_changes: true
