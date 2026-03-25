@@ -1,5 +1,5 @@
 # デフォルトパイプライン定義
-# implement → review → test → docs の4ステップ
+# implement ⇄ review（最大3回） → test → docs
 
 name: "default"
 description: "標準的な実装パイプライン"
@@ -19,6 +19,7 @@ steps:
       - まずリポジトリの構造とコードを読んで理解してください
       - 既存のコーディングスタイル・規約に従ってください
       - CLAUDE.md があればそのルールに従ってください
+      - Antigravity の rule.md があればそのルールにも従ってください
       - 必要最小限の変更で実装してください
       - 新規ファイルは必要な場合のみ作成してください
       - セキュリティ脆弱性を作り込まないでください
@@ -27,13 +28,17 @@ steps:
     max_turns: 50
 
   - name: "review"
-    description: "実装コードのセルフレビューと修正"
+    description: "実装コードのレビュー（問題点の指摘のみ、コード修正は行わない）"
     # model: "claude-opus-4-6"  # レビューは深い推論ができるモデル推奨
+    review_mode: "feedback_only"
+    max_iterations: 3
+    review_target: "implement"
     prompt_template: |
       あなたはシニアコードレビュアーです。
-      以下の変更差分をレビューし、問題があれば修正してください。
+      以下の変更差分をレビューし、問題点を書き出してください。
+      コードの修正は行わないでください。レビューコメントのみを出力してください。
 
-      ## レビュー対象（mainブランチからの差分）
+      ## レビュー対象（ベースブランチからの差分）
       ```
       {git_diff_from_main}
       ```
@@ -46,12 +51,38 @@ steps:
       5. コーディング規約違反
       6. 不要なコード・デバッグコードの残留
 
-      問題を見つけたら修正してください。
-      問題がなければ何もしないでください。
-    commit_prefix: "refactor"
-    allowed_tools: "Edit,Write,Bash,Glob,Grep,Read"
+      ## 出力フォーマット
+      問題がない場合は、1行目に以下のみを出力してください:
+      LGTM
+
+      問題がある場合は、以下の形式で問題点を列挙してください:
+      NEEDS_FIX
+      - [重要度: high/medium/low] ファイル名:行番号 - 問題の説明と修正案
+      - [重要度: high/medium/low] ファイル名:行番号 - 問題の説明と修正案
+      ...
+    reimpl_prompt_template: |
+      あなたはソフトウェアエンジニアです。
+      以下のレビュー指摘事項に基づいて、コードを修正してください。
+
+      ## 元の Issue #{issue_number}: {issue_title}
+      {issue_body}
+
+      ## 現在の変更差分（ベースブランチからの差分）
+      ```
+      {git_diff_from_main}
+      ```
+
+      ## レビュー指摘事項
+      {review_feedback}
+
+      ## 指示
+      - レビューで指摘された問題点を全て修正してください
+      - 指摘されていない箇所は変更しないでください
+      - CLAUDE.md があればそのルールに従ってください
+      - Antigravity の rule.md があればそのルールにも従ってください
+      - セキュリティ脆弱性を作り込まないでください
+    allowed_tools: "Glob,Grep,Read"
     max_turns: 30
-    skip_if_no_changes: true
 
   - name: "test"
     description: "テストの作成と実行"

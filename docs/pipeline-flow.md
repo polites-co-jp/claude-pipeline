@@ -9,14 +9,15 @@ GitHub Issue に `auto-implement` ラベルが付与されてから PR が作成
 1. [全体フロー概要](#1-全体フロー概要)
 2. [Step 0: リポジトリのクローン](#2-step-0-リポジトリのクローン)
 3. [Step 0.5: スキル発見・CLAUDE.md 合成](#3-step-05-スキル発見claudemd-合成)
-4. [Step 1: implement（実装）](#4-step-1-implement実装)
-5. [Step 2: review（レビュー）](#5-step-2-reviewレビュー)
-6. [Step 3: test（テスト）](#6-step-3-testテスト)
-7. [Step 4: docs（ドキュメント更新）](#7-step-4-docsドキュメント更新)
-8. [Step 5: Push & PR 作成](#8-step-5-push--pr-作成)
-9. [失敗時の処理](#9-失敗時の処理)
-10. [モデル解決の優先順位](#10-モデル解決の優先順位)
-11. [プロンプト変数一覧](#11-プロンプト変数一覧)
+4. [Step 1+2: implement ⇄ review ループ](#4-step-12-implement--review-ループ)
+5. [Step 3: test（テスト）](#5-step-3-testテスト)
+6. [Step 4: docs（ドキュメント更新）](#6-step-4-docsドキュメント更新)
+7. [Step 5: Push & PR 作成](#7-step-5-push--pr-作成)
+8. [失敗時の処理](#8-失敗時の処理)
+9. [モデル解決の優先順位](#9-モデル解決の優先順位)
+10. [プロンプト変数一覧](#10-プロンプト変数一覧)
+11. [ブランチ指定の仕様](#11-ブランチ指定の仕様)
+12. [プロンプト・レスポンス履歴](#12-プロンプトレスポンス履歴)
 
 ---
 
@@ -32,10 +33,12 @@ GitHub Issue (auto-implement ラベル)
   ジョブをスケジューリング
        │
        ▼ runner.sh（パイプライン実行エンジン）
-       ├─ Step 0    : リポジトリのクローン & ブランチ作成
+       ├─ Step 0    : リポジトリのクローン & ブランチ決定
        ├─ Step 0.5  : スキル発見 & CLAUDE.md 合成
-       ├─ Step 1    : implement（実装）        ← Claude Code CLI
-       ├─ Step 2    : review（レビュー）       ← Claude Code CLI
+       ├─ Step 1+2  : implement ⇄ review ループ（最大3回）
+       │    ├─ implement（実装）  ← Claude Code CLI
+       │    ├─ review（指摘のみ） ← Claude Code CLI（読取専用）
+       │    └─ 問題あり → 再実装 → 再レビュー ...（LGTM まで）
        ├─ Step 3    : test（テスト）           ← Claude Code CLI
        ├─ Step 4    : docs（ドキュメント更新） ← Claude Code CLI
        └─ Step 5    : Push & PR 作成
@@ -57,17 +60,53 @@ GitHub Issue (auto-implement ラベル)
 
 ---
 
-## 2. Step 0: リポジトリのクローン
+## 2. Step 0: リポジトリのクローン & ブランチ戦略
 
 > プロンプトなし — Git 操作のみ
+
+### 2.1 クローン
 
 | 処理 | コマンド・内容 |
 |------|----------------|
 | クローン | `git clone https://github.com/{owner/repo}.git {workspace_dir}` |
-| ベースブランチ切替 | `git checkout {base_branch}` |
-| feature ブランチ作成 | `git checkout -b {branch_prefix}issue-{number}` |
 
-**例:** `base_branch=main`, `branch_prefix=feat/` の場合 → `feat/issue-42`
+### 2.2 ブランチ戦略
+
+作業ブランチは以下の 2 パターンで決定されます:
+
+#### パターン A: Issue 内でブランチが指定されている場合
+
+Issue の本文に以下のいずれかの形式でブランチが記載されていると、そのブランチをそのまま使用します:
+
+```
+branch: feature/my-custom-branch
+```
+```
+ブランチ: feature/my-custom-branch
+```
+
+- リモートに既に存在する場合 → `git checkout {specified_branch}`
+- リモートに存在しない場合 → `git checkout {base_branch}` してから `git checkout -b {specified_branch}`
+
+#### パターン B: ブランチ指定がない場合（デフォルト）
+
+`develop` ブランチ（`base_branch`）から `feature/{作業内容}` ブランチを自動生成します。
+ベースブランチは Web UI またはCLI でリポジトリ登録時に変更可能です（デフォルト: `develop`）。
+ブランチプレフィックスは `feature/` 固定です。
+
+| 処理 | 内容 |
+|------|------|
+| ベースブランチ切替 | `git checkout {base_branch}`（デフォルト: `develop`） |
+| feature ブランチ作成 | `git checkout -b feature/{title_slug}` |
+
+ブランチ名の生成ルール:
+- Issue タイトルを小文字化し、英数字とハイフンに正規化（最大 50 文字）
+- 日本語タイトル等でスラッグが空になる場合は `issue-{number}` をフォールバック
+
+**例:**
+- Issue タイトル `Add user authentication` → `feature/add-user-authentication`
+- Issue タイトル `ユーザー認証の追加` → `feature/issue-42`
+- Issue 本文に `branch: hotfix/urgent-fix` → `hotfix/urgent-fix`（そのまま使用）
 
 ---
 
@@ -95,9 +134,31 @@ GitHub Issue (auto-implement ラベル)
 
 ---
 
-## 4. Step 1: implement（実装）
+## 4. Step 1+2: implement ⇄ review ループ
 
-### プロンプト
+実装とレビューは **最大 3 回のイテレーション** でループします。
+レビューステップはコードを修正せず、問題点の指摘のみを行います。指摘があれば実装モデルに渡して再実装し、再度レビューします。
+
+```
+implement（初回実装）
+    │
+    ▼
+review（問題点を指摘、コード修正なし）
+    │
+    ├─ LGTM → ループ終了、次のステップへ
+    │
+    └─ NEEDS_FIX → レビュー指摘を実装モデルに渡す
+         │
+         ▼
+    re-implement（指摘に基づく修正）
+         │
+         ▼
+    review（再レビュー）
+         │
+         └─ ... 最大 3 回まで繰り返し
+```
+
+### 4.1 implement プロンプト（初回実装）
 
 ```
 あなたはソフトウェアエンジニアです。
@@ -110,39 +171,27 @@ GitHub Issue (auto-implement ラベル)
 - まずリポジトリの構造とコードを読んで理解してください
 - 既存のコーディングスタイル・規約に従ってください
 - CLAUDE.md があればそのルールに従ってください
+- Antigravity の rule.md があればそのルールにも従ってください
 - 必要最小限の変更で実装してください
 - 新規ファイルは必要な場合のみ作成してください
 - セキュリティ脆弱性を作り込まないでください
 ```
-
-### プロンプト以外の処理
-
-| 処理 | 内容 |
-|------|------|
-| Claude 実行 | `claude -p "$PROMPT" --model {model} --allowedTools "Edit,Write,Bash,Glob,Grep,Read" --max-turns 50` |
-| コミット | 変更があれば `git add -A && git commit -m "feat(#{N}): implement - {title}"` |
-| diff 更新 | 次ステップ用に `git diff {base_branch}...HEAD` を再取得 |
-
-### 設定値
 
 | 項目 | 値 |
 |------|-----|
 | `commit_prefix` | `feat` |
 | `allowed_tools` | `Edit,Write,Bash,Glob,Grep,Read` |
 | `max_turns` | `50` |
-| 推奨モデル | （コメントなし。グローバル設定に従う） |
+| 推奨モデル | グローバル設定に従う |
 
----
-
-## 5. Step 2: review（レビュー）
-
-### プロンプト
+### 4.2 review プロンプト（問題点の指摘のみ）
 
 ```
 あなたはシニアコードレビュアーです。
-以下の変更差分をレビューし、問題があれば修正してください。
+以下の変更差分をレビューし、問題点を書き出してください。
+コードの修正は行わないでください。レビューコメントのみを出力してください。
 
-## レビュー対象（mainブランチからの差分）
+## レビュー対象（ベースブランチからの差分）
 {git_diff_from_main}
 
 ## チェック項目
@@ -153,31 +202,69 @@ GitHub Issue (auto-implement ラベル)
 5. コーディング規約違反
 6. 不要なコード・デバッグコードの残留
 
-問題を見つけたら修正してください。
-問題がなければ何もしないでください。
+## 出力フォーマット
+問題がない場合は、1行目に以下のみを出力してください:
+LGTM
+
+問題がある場合は、以下の形式で問題点を列挙してください:
+NEEDS_FIX
+- [重要度: high/medium/low] ファイル名:行番号 - 問題の説明と修正案
+- [重要度: high/medium/low] ファイル名:行番号 - 問題の説明と修正案
+...
 ```
-
-### プロンプト以外の処理
-
-| 処理 | 内容 |
-|------|------|
-| Claude 実行 | `claude -p "$PROMPT" --model {model} --allowedTools "Edit,Write,Bash,Glob,Grep,Read" --max-turns 30` |
-| skip 判定 | `skip_if_no_changes: true` — 変更がなければコミットをスキップ |
-| コミット | 変更があれば `git commit -m "refactor(#{N}): review - {title}"` |
-
-### 設定値
 
 | 項目 | 値 |
 |------|-----|
-| `commit_prefix` | `refactor` |
-| `allowed_tools` | `Edit,Write,Bash,Glob,Grep,Read` |
+| `review_mode` | `feedback_only` |
+| `allowed_tools` | `Glob,Grep,Read`（**読み取り専用**） |
 | `max_turns` | `30` |
-| `skip_if_no_changes` | `true` |
-| 推奨モデル | Opus（深い推論ができるモデル推奨、YAML コメントより） |
+| `max_iterations` | `3` |
+| 推奨モデル | Opus（深い推論ができるモデル推奨） |
+
+### 4.3 re-implement プロンプト（レビュー指摘に基づく再実装）
+
+レビューで `NEEDS_FIX` が返された場合、以下のプロンプトで実装モデルを再実行します:
+
+```
+あなたはソフトウェアエンジニアです。
+以下のレビュー指摘事項に基づいて、コードを修正してください。
+
+## 元の Issue #{issue_number}: {issue_title}
+{issue_body}
+
+## 現在の変更差分（ベースブランチからの差分）
+{git_diff_from_main}
+
+## レビュー指摘事項
+{review_feedback}
+
+## 指示
+- レビューで指摘された問題点を全て修正してください
+- 指摘されていない箇所は変更しないでください
+- CLAUDE.md があればそのルールに従ってください
+- Antigravity の rule.md があればそのルールにも従ってください
+- セキュリティ脆弱性を作り込まないでください
+```
+
+| 項目 | 値 |
+|------|-----|
+| `allowed_tools` | `Edit,Write,Bash,Glob,Grep,Read`（implement と同じ） |
+| `max_turns` | `50`（implement と同じ） |
+| コミット | `feat(#{N}): implement (review fix {iteration}) - {title}` |
+
+### 4.4 ループの動作
+
+| イテレーション | 動作 |
+|---------------|------|
+| 1 回目 | review 実行 → LGTM ならループ終了、NEEDS_FIX なら re-implement → コミット |
+| 2 回目 | 再度 review → LGTM ならループ終了、NEEDS_FIX なら re-implement → コミット |
+| 3 回目（最終） | 再度 review → LGTM でも NEEDS_FIX でもループ終了（最終イテレーションでは再実装しない） |
+
+> 最大イテレーション到達時に指摘が残っている場合、警告ログを出力して次のステップへ進みます。
 
 ---
 
-## 6. Step 3: test（テスト）
+## 5. Step 3: test（テスト）
 
 ### プロンプト
 
@@ -224,7 +311,7 @@ GitHub Issue (auto-implement ラベル)
 
 ---
 
-## 7. Step 4: docs（ドキュメント更新）
+## 6. Step 4: docs（ドキュメント更新）
 
 ### プロンプト
 
@@ -263,7 +350,7 @@ GitHub Issue (auto-implement ラベル)
 
 ---
 
-## 8. Step 5: Push & PR 作成
+## 7. Step 5: Push & PR 作成
 
 > プロンプトなし — Git 操作と GitHub API のみ
 
@@ -304,7 +391,7 @@ Closes #{issue_number}
 
 ---
 
-## 9. 失敗時の処理
+## 8. 失敗時の処理
 
 任意のステップで失敗が発生すると、`trap cleanup EXIT` により以下が実行されます:
 
@@ -330,7 +417,7 @@ Closes #{issue_number}
 
 ---
 
-## 10. モデル解決の優先順位
+## 9. モデル解決の優先順位
 
 各ステップの Claude モデルは、以下の優先順位で決定されます（上が最優先）:
 
@@ -345,7 +432,7 @@ Closes #{issue_number}
 
 ---
 
-## 11. プロンプト変数一覧
+## 10. プロンプト変数一覧
 
 プロンプトテンプレート内で使用できるプレースホルダと、その展開タイミング:
 
@@ -355,6 +442,105 @@ Closes #{issue_number}
 | `{issue_title}` | ジョブ JSON の `issue_title` | implement |
 | `{issue_body}` | ジョブ JSON の `issue_body` | implement |
 | `{git_diff}` | `git diff HEAD~1` | （未使用だが利用可能） |
-| `{git_diff_from_main}` | `git diff {base_branch}...HEAD` | review, test, docs |
+| `{git_diff_from_main}` | `git diff {base_branch}...HEAD` | review, re-implement, test, docs |
+| `{review_feedback}` | review ステップの出力（レビュー指摘事項） | re-implement |
 
-> `{git_diff_from_main}` は各ステップ実行直前に再取得されるため、前ステップのコミット内容が反映されます。
+> `{git_diff_from_main}` は各ステップ・各イテレーション実行直前に再取得されるため、直前のコミット内容が反映されます。
+
+---
+
+## 11. ブランチ指定の仕様
+
+### Issue 本文でのブランチ指定フォーマット
+
+Issue 本文の行頭に以下のいずれかの形式で記載すると、パイプラインはそのブランチ上で作業します:
+
+```
+branch: <ブランチ名>
+ブランチ: <ブランチ名>
+```
+
+- 大文字小文字は区別しません（`Branch:` も有効）
+- 区切り文字は `:` と `：`（全角）の両方に対応
+- 複数行ある場合は最初の一致が使用されます
+
+### ジョブ JSON のフィールド
+
+| フィールド | 内容 |
+|-----------|------|
+| `branch_prefix` | 固定: `feature/` |
+| `base_branch` | デフォルト: `develop`（Web UI / CLI で変更可能） |
+| `specified_branch` | Issue 本文から抽出されたブランチ名（なければ空文字） |
+
+### Issue 記載例
+
+```markdown
+## 概要
+ユーザー認証機能を追加してください。
+
+branch: feature/user-auth
+
+## 詳細
+- JWT ベースの認証
+- ログイン / ログアウト API
+```
+
+---
+
+## 12. プロンプト・レスポンス履歴
+
+パイプライン実行時の Claude への全プロンプトとレスポンスは、自動的にファイルとして保存されます。
+
+### 12.1 保存先
+
+```
+workspace/.history/{repo_name}/
+  {timestamp}_issue-{N}_{step}_{label}.json
+```
+
+**例:**
+```
+workspace/.history/my-app/
+  20260325-143022_issue-42_implement.json
+  20260325-143155_issue-42_review_iteration-1.json
+  20260325-143301_issue-42_reimpl_iteration-1.json
+  20260325-143422_issue-42_review_iteration-2.json
+  20260325-143530_issue-42_test.json
+  20260325-143612_issue-42_docs.json
+```
+
+### 12.2 ファイル形式
+
+```json
+{
+  "timestamp": "2026-03-25T14:30:22Z",
+  "repo": "owner/my-app",
+  "repo_name": "my-app",
+  "issue_number": 42,
+  "issue_title": "ユーザー認証の追加",
+  "step": "implement",
+  "label": "",
+  "model": "claude-sonnet-4-6",
+  "exit_code": 0,
+  "prompt": "あなたはソフトウェアエンジニアです。...",
+  "response": "まずリポジトリの構造を確認します。..."
+}
+```
+
+### 12.3 保存上限
+
+- リポジトリごとに **最大 100 件**
+- 101 件目の保存時に、最も古いファイルから自動削除
+
+### 12.4 Web UI での閲覧
+
+「履歴」タブからリポジトリを選択すると、実行履歴の一覧が表示されます。
+各エントリの「詳細」ボタンで、プロンプト全文とレスポンス全文を閲覧できます。
+
+### 12.5 API エンドポイント
+
+| エンドポイント | 内容 |
+|---------------|------|
+| `GET /api/history` | 履歴が存在するリポジトリ名一覧 |
+| `GET /api/history/:repo` | リポジトリの履歴サマリー一覧（新しい順） |
+| `GET /api/history/:repo/:file` | 個別履歴の全データ（プロンプト・レスポンス含む） |

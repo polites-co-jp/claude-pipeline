@@ -73,8 +73,8 @@ repositories: []
   # - name: "my-next-app"
   #   repo: "yourname/my-next-app"
   #   pipeline: "default"
-  #   branch_prefix: "feat/"
-  #   base_branch: "main"
+  #   branch_prefix: "feature/"
+  #   base_branch: "develop"
   #   status: "active"
   #   claude_model: ""              # 空欄ならグローバル設定を使用
   #   pinned_skills: []             # 常に適用するスキル

@@ -49,7 +49,7 @@ app.get('/api/repos', (req, res) => {
 });
 
 app.post('/api/repos', (req, res) => {
-  const { repo, pipeline, branch_prefix, base_branch, context, pinned_skills } = req.body;
+  const { repo, pipeline, base_branch, context, pinned_skills } = req.body;
   if (!repo) return res.status(400).json({ error: 'repo は必須です' });
 
   const config = readConfig();
@@ -65,8 +65,8 @@ app.post('/api/repos', (req, res) => {
     name,
     repo,
     pipeline: pipeline || 'default',
-    branch_prefix: branch_prefix || 'feat/',
-    base_branch: base_branch || 'main',
+    branch_prefix: 'feature/',
+    base_branch: base_branch || 'develop',
     status: 'active',
     pinned_skills: pinned_skills || [],
   };
@@ -86,7 +86,7 @@ app.put('/api/repos/:name', (req, res) => {
   const repo = config.repositories[idx];
 
   // 更新可能なフィールド
-  for (const key of ['pipeline', 'branch_prefix', 'base_branch', 'status', 'context', 'claude_model', 'pinned_skills']) {
+  for (const key of ['pipeline', 'base_branch', 'status', 'context', 'claude_model', 'pinned_skills']) {
     if (updates[key] !== undefined) {
       repo[key] = updates[key];
     }
@@ -175,6 +175,58 @@ app.get('/api/logs/:repo/:file', (req, res) => {
 
   const content = fs.readFileSync(logFile, 'utf8');
   res.json({ content });
+});
+
+// --- API: プロンプト・レスポンス履歴 ---
+
+const HISTORY_DIR = path.join(WORKSPACE_DIR, '.history');
+
+app.get('/api/history', (req, res) => {
+  if (!fs.existsSync(HISTORY_DIR)) return res.json([]);
+  const repos = fs.readdirSync(HISTORY_DIR, { withFileTypes: true })
+    .filter(d => d.isDirectory())
+    .map(d => d.name);
+  res.json(repos);
+});
+
+app.get('/api/history/:repo', (req, res) => {
+  const repoDir = path.join(HISTORY_DIR, req.params.repo);
+  if (!fs.existsSync(repoDir)) return res.json([]);
+
+  const files = fs.readdirSync(repoDir)
+    .filter(f => f.endsWith('.json'))
+    .map(f => {
+      try {
+        const data = JSON.parse(fs.readFileSync(path.join(repoDir, f), 'utf8'));
+        // 一覧用にはプロンプト・レスポンス本文を除いたサマリーを返す
+        return {
+          filename: f,
+          timestamp: data.timestamp,
+          issue_number: data.issue_number,
+          issue_title: data.issue_title,
+          step: data.step,
+          label: data.label,
+          model: data.model,
+          exit_code: data.exit_code,
+        };
+      } catch { return null; }
+    })
+    .filter(Boolean)
+    .sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+
+  res.json(files);
+});
+
+app.get('/api/history/:repo/:file', (req, res) => {
+  const filePath = path.join(HISTORY_DIR, req.params.repo, req.params.file);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: '履歴が見つかりません' });
+
+  try {
+    const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    res.json(data);
+  } catch {
+    res.status(500).json({ error: 'ファイル読み取りエラー' });
+  }
 });
 
 // --- API: アクション ---

@@ -16,6 +16,7 @@
 <div class="tabs">
   <div class="tab active" data-tab="dashboard">ダッシュボード</div>
   <div class="tab" data-tab="repos">リポジトリ</div>
+  <div class="tab" data-tab="history">履歴</div>
   <div class="tab" data-tab="settings">設定</div>
   <div class="tab" data-tab="logs">ログ</div>
 </div>
@@ -49,6 +50,25 @@
         <button class="btn btn-primary btn-sm" onclick="RepoModal.open()">+ 追加</button>
       </h2>
       <div id="repos-table"></div>
+    </div>
+  </div>
+
+  <!-- 履歴 -->
+  <div id="history" class="section">
+    <div class="card">
+      <h2>プロンプト・レスポンス履歴</h2>
+      <div style="display:flex;gap:12px;margin-bottom:16px;">
+        <div class="form-group" style="flex:1;margin:0;">
+          <select id="history-repo" onchange="History.loadEntries()">
+            <option value="">リポジトリを選択...</option>
+          </select>
+        </div>
+      </div>
+      <div id="history-list"></div>
+    </div>
+    <div class="card" id="history-detail-card" style="display:none;">
+      <h2 id="history-detail-title">詳細</h2>
+      <div id="history-detail"></div>
     </div>
   </div>
 
@@ -133,12 +153,9 @@
         <input type="text" name="pipeline" value="default">
       </div>
       <div class="form-group">
-        <label>ブランチプレフィックス</label>
-        <input type="text" name="branch_prefix" value="feat/">
-      </div>
-      <div class="form-group">
         <label>ベースブランチ</label>
-        <input type="text" name="base_branch" value="main">
+        <input type="text" name="base_branch" value="develop" placeholder="develop">
+        <small>feature ブランチの派生元。デフォルト: develop</small>
       </div>
       <div class="form-group">
         <label>コンテキスト（プロジェクト情報）</label>

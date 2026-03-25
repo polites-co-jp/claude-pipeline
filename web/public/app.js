@@ -73,12 +73,12 @@ const Repos = {
       return;
     }
     el.innerHTML = `<table>
-      <tr><th>名前</th><th>リポジトリ</th><th>パイプライン</th><th>ブランチ</th><th>ステータス</th><th>操作</th></tr>
+      <tr><th>名前</th><th>リポジトリ</th><th>パイプライン</th><th>ベースブランチ</th><th>ステータス</th><th>操作</th></tr>
       ${repos.map(r => `<tr>
         <td><strong>${r.name}</strong></td>
         <td>${r.repo}</td>
         <td>${r.pipeline}</td>
-        <td>${r.branch_prefix} → ${r.base_branch}</td>
+        <td>${r.base_branch || 'develop'}</td>
         <td><span class="badge badge-${r.status}">${r.status}</span></td>
         <td>
           <div class="btn-group">
@@ -119,8 +119,7 @@ const RepoModal = {
       form.repo.value = data.repo;
       form.repo.disabled = true;
       form.pipeline.value = data.pipeline || 'default';
-      form.branch_prefix.value = data.branch_prefix || 'feat/';
-      form.base_branch.value = data.base_branch || 'main';
+      form.base_branch.value = data.base_branch || 'develop';
       form.context.value = data.context || '';
     } else {
       document.getElementById('repo-modal-title').textContent = 'リポジトリを追加';
@@ -148,8 +147,7 @@ const RepoModal = {
     const data = {
       repo: form.repo.value,
       pipeline: form.pipeline.value,
-      branch_prefix: form.branch_prefix.value,
-      base_branch: form.base_branch.value,
+      base_branch: form.base_branch.value || 'develop',
       context: form.context.value || undefined,
     };
 
@@ -168,6 +166,76 @@ const RepoModal = {
     this.close();
     Repos.load();
     Dashboard.load();
+  }
+};
+
+// --- 履歴 ---
+const History = {
+  async load() {
+    const repos = await api('/history');
+    const sel = document.getElementById('history-repo');
+    sel.innerHTML = '<option value="">リポジトリを選択...</option>' +
+      repos.map(r => `<option value="${r}">${r}</option>`).join('');
+  },
+
+  async loadEntries() {
+    const repo = document.getElementById('history-repo').value;
+    const el = document.getElementById('history-list');
+    const detailCard = document.getElementById('history-detail-card');
+    detailCard.style.display = 'none';
+
+    if (!repo) {
+      el.innerHTML = '<div class="empty">リポジトリを選択してください</div>';
+      return;
+    }
+
+    const entries = await api(`/history/${repo}`);
+    if (!entries.length) {
+      el.innerHTML = '<div class="empty">履歴がありません</div>';
+      return;
+    }
+
+    el.innerHTML = `<table>
+      <tr><th>日時</th><th>Issue</th><th>ステップ</th><th>モデル</th><th>結果</th><th></th></tr>
+      ${entries.map(e => `<tr>
+        <td>${new Date(e.timestamp).toLocaleString('ja-JP')}</td>
+        <td>#${e.issue_number} ${e.issue_title || ''}</td>
+        <td>${e.step}${e.label ? ' (' + e.label + ')' : ''}</td>
+        <td>${e.model}</td>
+        <td><span class="badge badge-${e.exit_code === 0 ? 'completed' : 'failed'}">${e.exit_code === 0 ? 'OK' : 'Error'}</span></td>
+        <td><button class="btn btn-sm" onclick="History.showDetail('${repo}', '${e.filename}')">詳細</button></td>
+      </tr>`).join('')}
+    </table>`;
+  },
+
+  async showDetail(repo, filename) {
+    const data = await api(`/history/${repo}/${filename}`);
+    const card = document.getElementById('history-detail-card');
+    const title = document.getElementById('history-detail-title');
+    const el = document.getElementById('history-detail');
+
+    title.textContent = `#${data.issue_number} ${data.step}${data.label ? ' (' + data.label + ')' : ''} — ${new Date(data.timestamp).toLocaleString('ja-JP')}`;
+
+    el.innerHTML = `
+      <div style="margin-bottom:8px;">
+        <strong>モデル:</strong> ${data.model} &nbsp;
+        <strong>Exit:</strong> <span class="badge badge-${data.exit_code === 0 ? 'completed' : 'failed'}">${data.exit_code}</span>
+      </div>
+      <h3>プロンプト</h3>
+      <div class="log-viewer" style="max-height:300px;overflow:auto;margin-bottom:16px;">${History.escapeHtml(data.prompt)}</div>
+      <h3>レスポンス</h3>
+      <div class="log-viewer" style="max-height:500px;overflow:auto;">${History.escapeHtml(data.response)}</div>
+    `;
+
+    card.style.display = 'block';
+    card.scrollIntoView({ behavior: 'smooth' });
+  },
+
+  escapeHtml(text) {
+    if (!text) return '(空)';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
   }
 };
 
@@ -250,6 +318,7 @@ const Actions = {
 // --- 初期化 ---
 Dashboard.load();
 Repos.load();
+History.load();
 Settings.load();
 Logs.load();
 

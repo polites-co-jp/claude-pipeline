@@ -46,8 +46,8 @@ claude-pipeline - Issue駆動の自動開発パイプライン
 リポジトリ管理:
   repo add <owner/repo>    リポジトリを登録
     --pipeline <name>        パイプライン名 (デフォルト: default)
-    --branch-prefix <prefix> ブランチプレフィックス (デフォルト: feat/)
-    --base-branch <branch>   ベースブランチ (デフォルト: main)
+    --branch-prefix <prefix> ブランチプレフィックス (デフォルト: feature/)
+    --base-branch <branch>   ベースブランチ (デフォルト: develop)
     --context <text>         プロジェクトコンテキスト
   repo list                登録リポジトリ一覧
   repo pause <name>        リポジトリを一時停止
@@ -78,8 +78,8 @@ EOF
 repo_add() {
   local REPO=""
   local PIPELINE="default"
-  local BRANCH_PREFIX="feat/"
-  local BASE_BRANCH="main"
+  local BRANCH_PREFIX="feature/"
+  local BASE_BRANCH="develop"
   local CONTEXT=""
 
   while [ $# -gt 0 ]; do
@@ -282,12 +282,15 @@ run_manual() {
     exit 1
   fi
 
-  local ISSUE_TITLE ISSUE_BODY PIPELINE BRANCH_PREFIX BASE_BRANCH
+  local ISSUE_TITLE ISSUE_BODY PIPELINE BRANCH_PREFIX BASE_BRANCH SPECIFIED_BRANCH
   ISSUE_TITLE=$(echo "$ISSUE_DATA" | jq -r '.title')
   ISSUE_BODY=$(echo "$ISSUE_DATA" | jq -r '.body // ""')
   PIPELINE=$(yq ".repositories[] | select(.name == \"$REPO_NAME\") | .pipeline // \"default\"" "$CONFIG")
-  BRANCH_PREFIX=$(yq ".repositories[] | select(.name == \"$REPO_NAME\") | .branch_prefix // \"feat/\"" "$CONFIG")
-  BASE_BRANCH=$(yq ".repositories[] | select(.name == \"$REPO_NAME\") | .base_branch // \"main\"" "$CONFIG")
+  BRANCH_PREFIX=$(yq ".repositories[] | select(.name == \"$REPO_NAME\") | .branch_prefix // \"feature/\"" "$CONFIG")
+  BASE_BRANCH=$(yq ".repositories[] | select(.name == \"$REPO_NAME\") | .base_branch // \"develop\"" "$CONFIG")
+
+  # Issue body からブランチ指定を抽出
+  SPECIFIED_BRANCH=$(echo "$ISSUE_BODY" | grep -iE '^\s*(branch|ブランチ)\s*[:：]\s*' | head -1 | sed -E 's/^\s*(branch|ブランチ)\s*[:：]\s*//' | tr -d '[:space:]' || echo "")
 
   local JOB_ID="${REPO_NAME}-${ISSUE_NUMBER}"
 
@@ -302,6 +305,7 @@ run_manual() {
     --arg pipeline "$PIPELINE" \
     --arg branch_prefix "$BRANCH_PREFIX" \
     --arg base_branch "$BASE_BRANCH" \
+    --arg specified_branch "$SPECIFIED_BRANCH" \
     --arg status "running" \
     --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -314,6 +318,7 @@ run_manual() {
       pipeline: $pipeline,
       branch_prefix: $branch_prefix,
       base_branch: $base_branch,
+      specified_branch: $specified_branch,
       status: $status,
       created_at: $created_at,
       started_at: $started_at

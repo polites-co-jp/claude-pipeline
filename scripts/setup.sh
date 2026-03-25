@@ -84,6 +84,7 @@ echo "📋 ディレクトリの作成..."
 mkdir -p "$BASE_DIR/workspace/.queue"
 mkdir -p "$BASE_DIR/workspace/.jobs"
 mkdir -p "$BASE_DIR/workspace/.locks"
+mkdir -p "$BASE_DIR/workspace/.history"
 mkdir -p "$BASE_DIR/logs"
 mkdir -p "$BASE_DIR/skills/cache"
 

@@ -27,10 +27,13 @@ ISSUE_BODY=$(jq -r '.issue_body' "$JOB_FILE")
 PIPELINE=$(jq -r '.pipeline' "$JOB_FILE")
 BRANCH_PREFIX=$(jq -r '.branch_prefix' "$JOB_FILE")
 BASE_BRANCH=$(jq -r '.base_branch' "$JOB_FILE")
+SPECIFIED_BRANCH=$(jq -r '.specified_branch // ""' "$JOB_FILE")
 
 JOB_ID="${REPO_NAME}-${ISSUE_NUMBER}"
 WORKSPACE_DIR="$BASE_DIR/workspace/${JOB_ID}"
 PIPELINE_FILE="$BASE_DIR/pipelines/${PIPELINE}.yaml"
+HISTORY_DIR="$BASE_DIR/workspace/.history/${REPO_NAME}"
+HISTORY_MAX=100
 LOCKS_DIR="$BASE_DIR/workspace/.locks"
 
 # GitHub トークン設定
@@ -66,6 +69,10 @@ echo " claude-pipeline runner"
 echo " リポジトリ: $REPO"
 echo " Issue: #${ISSUE_NUMBER} - ${ISSUE_TITLE}"
 echo " パイプライン: $PIPELINE"
+echo " ベースブランチ: $BASE_BRANCH"
+if [ -n "$SPECIFIED_BRANCH" ]; then
+echo " 指定ブランチ: $SPECIFIED_BRANCH"
+fi
 echo " デフォルトモデル: $DEFAULT_MODEL"
 echo " 開始: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "================================================================"
@@ -137,13 +144,44 @@ rm -rf "$WORKSPACE_DIR"
 git clone "https://github.com/${REPO}.git" "$WORKSPACE_DIR"
 cd "$WORKSPACE_DIR"
 
-# ベースブランチに切り替え
-git checkout "$BASE_BRANCH"
+# ブランチ戦略の決定
+# 1. Issue 内でブランチが指定されている場合 → そのブランチをそのまま使用
+# 2. 指定がない場合 → base_branch から feature/{issue_title_slug} ブランチを作成
+if [ -n "$SPECIFIED_BRANCH" ]; then
+  # Issue で指定されたブランチを使用
+  # リモートに存在するか確認
+  if git ls-remote --heads origin "$SPECIFIED_BRANCH" | grep -q "$SPECIFIED_BRANCH"; then
+    git checkout "$SPECIFIED_BRANCH"
+    echo "[runner] 指定ブランチにチェックアウト: $SPECIFIED_BRANCH"
+  else
+    # リモートに存在しない場合、ベースブランチから作成
+    git checkout "$BASE_BRANCH"
+    git checkout -b "$SPECIFIED_BRANCH"
+    echo "[runner] 指定ブランチを新規作成: $SPECIFIED_BRANCH (from $BASE_BRANCH)"
+  fi
+  BRANCH_NAME="$SPECIFIED_BRANCH"
+else
+  # デフォルト: ベースブランチから feature ブランチを作成
+  git checkout "$BASE_BRANCH"
 
-# feature ブランチ作成
-BRANCH_NAME="${BRANCH_PREFIX}issue-${ISSUE_NUMBER}"
-git checkout -b "$BRANCH_NAME"
-echo "[runner] ブランチ作成: $BRANCH_NAME"
+  # Issue タイトルからブランチ名を生成（英数字・ハイフンに正規化）
+  TITLE_SLUG=$(echo "$ISSUE_TITLE" | \
+    tr '[:upper:]' '[:lower:]' | \
+    sed 's/[^a-z0-9]/-/g' | \
+    sed 's/--*/-/g' | \
+    sed 's/^-//' | \
+    sed 's/-$//' | \
+    cut -c1-50)
+
+  # スラッグが空の場合（日本語タイトル等）はIssue番号をフォールバック
+  if [ -z "$TITLE_SLUG" ]; then
+    TITLE_SLUG="issue-${ISSUE_NUMBER}"
+  fi
+
+  BRANCH_NAME="${BRANCH_PREFIX}${TITLE_SLUG}"
+  git checkout -b "$BRANCH_NAME"
+  echo "[runner] ブランチ作成: $BRANCH_NAME (from $BASE_BRANCH)"
+fi
 
 # === 2. スキル発見・CLAUDE.md 合成 ===
 echo ""
@@ -220,27 +258,147 @@ if [ -n "$SYNTHESIZED_CLAUDE_MD" ]; then
 fi
 
 # === 3. パイプラインステップの実行 ===
+
+# --- ヘルパー関数: モデル解決 ---
+resolve_model() {
+  local step_index="$1"
+  local step_name="$2"
+  local model
+  model=$(yq ".steps[$step_index].model // \"\"" "$PIPELINE_FILE")
+  if [ -n "$model" ]; then
+    echo "$model"
+    return
+  fi
+  local name_upper
+  name_upper=$(echo "$step_name" | tr '[:lower:]' '[:upper:]' | tr '-' '_')
+  local env_var="CLAUDE_MODEL_${name_upper}"
+  local env_model="${!env_var:-}"
+  if [ -n "$env_model" ]; then
+    echo "$env_model"
+    return
+  fi
+  echo "$DEFAULT_MODEL"
+}
+
+# --- ヘルパー関数: プロンプト変数展開 ---
+expand_prompt() {
+  local template="$1"
+  local prompt="$template"
+  local git_diff_main
+  git_diff_main=$(git diff "${BASE_BRANCH}...HEAD" 2>/dev/null || echo "(差分なし)")
+  local git_diff_head
+  git_diff_head=$(git diff HEAD~1 2>/dev/null || echo "(初回コミットのため差分なし)")
+
+  prompt="${prompt//\{issue_number\}/$ISSUE_NUMBER}"
+  prompt="${prompt//\{issue_title\}/$ISSUE_TITLE}"
+  prompt="${prompt//\{issue_body\}/$ISSUE_BODY}"
+  prompt="${prompt//\{git_diff\}/$git_diff_head}"
+  prompt="${prompt//\{git_diff_from_main\}/$git_diff_main}"
+  echo "$prompt"
+}
+
+# --- ヘルパー関数: Claude Code 実行 ---
+run_claude() {
+  local prompt="$1"
+  local model="$2"
+  local tools="$3"
+  local turns="$4"
+
+  echo "[runner] Claude Code を実行中... (model: $model, max_turns: $turns)"
+  set +e
+  local output
+  output=$(claude -p "$prompt" \
+    --model "$model" \
+    --allowedTools "$tools" \
+    --max-turns "$turns" \
+    2>&1)
+  local exit_code=$?
+  set -e
+
+  # 履歴を保存（RUN_CLAUDE_OUTPUT に格納、呼び出し元で参照）
+  RUN_CLAUDE_OUTPUT="$output"
+
+  echo "$output"
+  return $exit_code
+}
+
+# --- ヘルパー関数: プロンプト・レスポンス履歴の保存 ---
+save_history() {
+  local step_name="$1"
+  local model="$2"
+  local prompt="$3"
+  local response="$4"
+  local exit_code="${5:-0}"
+  local label="${6:-}"
+
+  mkdir -p "$HISTORY_DIR"
+
+  local timestamp
+  timestamp=$(date -u +%Y%m%d-%H%M%S)
+  local filename="${timestamp}_issue-${ISSUE_NUMBER}_${step_name}"
+  [ -n "$label" ] && filename="${filename}_${label}"
+  filename="${filename}.json"
+
+  jq -n \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg repo "$REPO" \
+    --arg repo_name "$REPO_NAME" \
+    --argjson issue_number "$ISSUE_NUMBER" \
+    --arg issue_title "$ISSUE_TITLE" \
+    --arg step "$step_name" \
+    --arg model "$model" \
+    --arg prompt "$prompt" \
+    --arg response "$response" \
+    --argjson exit_code "$exit_code" \
+    --arg label "$label" \
+    '{
+      timestamp: $ts,
+      repo: $repo,
+      repo_name: $repo_name,
+      issue_number: $issue_number,
+      issue_title: $issue_title,
+      step: $step,
+      label: $label,
+      model: $model,
+      exit_code: $exit_code,
+      prompt: $prompt,
+      response: $response
+    }' > "$HISTORY_DIR/$filename"
+
+  echo "[runner] 📄 履歴保存: $filename"
+
+  # 古い履歴を削除（最大 HISTORY_MAX 件）
+  local count
+  count=$(ls -1 "$HISTORY_DIR" | wc -l)
+  if [ "$count" -gt "$HISTORY_MAX" ]; then
+    local to_delete=$((count - HISTORY_MAX))
+    ls -1t "$HISTORY_DIR" | tail -n "$to_delete" | while IFS= read -r old_file; do
+      rm -f "$HISTORY_DIR/$old_file"
+    done
+    echo "[runner] 🗑️ 古い履歴を ${to_delete} 件削除"
+  fi
+}
+
+# --- ヘルパー関数: 変更のコミット ---
+commit_if_changed() {
+  local prefix="$1"
+  local step_name="$2"
+  local label="${3:-}"
+  if [ -n "$(git status --porcelain)" ]; then
+    git add -A
+    local msg="${prefix}(#${ISSUE_NUMBER}): ${step_name} - ${ISSUE_TITLE}"
+    [ -n "$label" ] && msg="${prefix}(#${ISSUE_NUMBER}): ${step_name} (${label}) - ${ISSUE_TITLE}"
+    git commit -m "$msg"
+    echo "[runner] ✅ コミット: $msg"
+    return 0
+  fi
+  return 1
+}
+
 for i in $(seq 0 $((STEP_COUNT - 1))); do
   STEP_NAME=$(yq ".steps[$i].name" "$PIPELINE_FILE")
   STEP_DESC=$(yq ".steps[$i].description // \"\"" "$PIPELINE_FILE")
-  COMMIT_PREFIX=$(yq ".steps[$i].commit_prefix // \"chore\"" "$PIPELINE_FILE")
-  ALLOWED_TOOLS=$(yq ".steps[$i].allowed_tools // \"Edit,Write,Bash,Glob,Grep,Read\"" "$PIPELINE_FILE")
-  MAX_TURNS=$(yq ".steps[$i].max_turns // 30" "$PIPELINE_FILE")
-  SKIP_IF_NO_CHANGES=$(yq ".steps[$i].skip_if_no_changes // false" "$PIPELINE_FILE")
-  RETRY_ON_TEST_FAILURE=$(yq ".steps[$i].retry_on_test_failure // 0" "$PIPELINE_FILE")
-
-  # モデル解決（優先順位: ステップyaml > 環境変数 CLAUDE_MODEL_<STEP> > デフォルト）
-  STEP_MODEL=$(yq ".steps[$i].model // \"\"" "$PIPELINE_FILE")
-  STEP_NAME_UPPER=$(echo "$STEP_NAME" | tr '[:lower:]' '[:upper:]' | tr '-' '_')
-  ENV_VAR_NAME="CLAUDE_MODEL_${STEP_NAME_UPPER}"
-  ENV_STEP_MODEL="${!ENV_VAR_NAME:-}"
-  if [ -n "$STEP_MODEL" ]; then
-    CURRENT_MODEL="$STEP_MODEL"
-  elif [ -n "$ENV_STEP_MODEL" ]; then
-    CURRENT_MODEL="$ENV_STEP_MODEL"
-  else
-    CURRENT_MODEL="$DEFAULT_MODEL"
-  fi
+  REVIEW_MODE=$(yq ".steps[$i].review_mode // \"\"" "$PIPELINE_FILE")
 
   CURRENT_STEP="$STEP_NAME"
 
@@ -250,20 +408,114 @@ for i in $(seq 0 $((STEP_COUNT - 1))); do
   # ジョブステータスを更新
   jq --arg step "$STEP_NAME" '.current_step = $step' "$JOB_FILE" > "${JOB_FILE}.tmp" && mv "${JOB_FILE}.tmp" "$JOB_FILE"
 
+  # ============================================================
+  # review_mode: feedback_only — 実装⇄レビューループ
+  # ============================================================
+  if [ "$REVIEW_MODE" = "feedback_only" ]; then
+    MAX_ITERATIONS=$(yq ".steps[$i].max_iterations // 3" "$PIPELINE_FILE")
+    REVIEW_TARGET=$(yq ".steps[$i].review_target // \"implement\"" "$PIPELINE_FILE")
+    REVIEW_TOOLS=$(yq ".steps[$i].allowed_tools // \"Glob,Grep,Read\"" "$PIPELINE_FILE")
+    REVIEW_TURNS=$(yq ".steps[$i].max_turns // 30" "$PIPELINE_FILE")
+    REVIEW_MODEL=$(resolve_model "$i" "$STEP_NAME")
+
+    # レビュー対象ステップの情報を取得（再実装用）
+    TARGET_INDEX=""
+    for ti in $(seq 0 $((STEP_COUNT - 1))); do
+      if [ "$(yq ".steps[$ti].name" "$PIPELINE_FILE")" = "$REVIEW_TARGET" ]; then
+        TARGET_INDEX="$ti"
+        break
+      fi
+    done
+
+    if [ -z "$TARGET_INDEX" ]; then
+      echo "[runner] ❌ review_target '$REVIEW_TARGET' が見つかりません"
+      exit 1
+    fi
+
+    IMPL_MODEL=$(resolve_model "$TARGET_INDEX" "$REVIEW_TARGET")
+    IMPL_TOOLS=$(yq ".steps[$TARGET_INDEX].allowed_tools // \"Edit,Write,Bash,Glob,Grep,Read\"" "$PIPELINE_FILE")
+    IMPL_TURNS=$(yq ".steps[$TARGET_INDEX].max_turns // 50" "$PIPELINE_FILE")
+    IMPL_PREFIX=$(yq ".steps[$TARGET_INDEX].commit_prefix // \"feat\"" "$PIPELINE_FILE")
+    REIMPL_TEMPLATE=$(yq ".steps[$i].reimpl_prompt_template // \"\"" "$PIPELINE_FILE")
+
+    for iteration in $(seq 1 "$MAX_ITERATIONS"); do
+      echo ""
+      echo "[runner] --- レビューイテレーション ${iteration}/${MAX_ITERATIONS} ---"
+      CURRENT_STEP="review (iteration ${iteration})"
+
+      # レビュー実行（読み取り専用）
+      REVIEW_PROMPT_TEMPLATE=$(yq ".steps[$i].prompt_template" "$PIPELINE_FILE")
+      REVIEW_PROMPT=$(expand_prompt "$REVIEW_PROMPT_TEMPLATE")
+
+      echo "[runner] 📝 レビュー実行中..."
+      set +e
+      REVIEW_OUTPUT=$(run_claude "$REVIEW_PROMPT" "$REVIEW_MODEL" "$REVIEW_TOOLS" "$REVIEW_TURNS")
+      REVIEW_EXIT=$?
+      set -e
+
+      echo "$REVIEW_OUTPUT"
+
+      # レビュー履歴を保存
+      save_history "review" "$REVIEW_MODEL" "$REVIEW_PROMPT" "$REVIEW_OUTPUT" "$REVIEW_EXIT" "iteration-${iteration}"
+
+      if [ $REVIEW_EXIT -ne 0 ]; then
+        echo "[runner] ⚠️ レビューがエラーで終了 (exit: $REVIEW_EXIT) だが続行します"
+      fi
+
+      # レビュー結果の判定: 先頭行が LGTM なら問題なし
+      FIRST_LINE=$(echo "$REVIEW_OUTPUT" | grep -E '^\s*(LGTM|NEEDS_FIX)' | head -1 | tr -d '[:space:]')
+
+      if [ "$FIRST_LINE" = "LGTM" ]; then
+        echo "[runner] ✅ レビュー通過 (LGTM) — イテレーション ${iteration} で完了"
+        break
+      fi
+
+      echo "[runner] 🔄 レビューで問題を検出、再実装を実行します"
+
+      # 最終イテレーションの場合は再実装せず警告のみ
+      if [ "$iteration" -eq "$MAX_ITERATIONS" ]; then
+        echo "[runner] ⚠️ 最大イテレーション (${MAX_ITERATIONS}) に達しました。レビュー指摘が残っている可能性があります"
+        break
+      fi
+
+      # 再実装: レビュー指摘をフィードバックとして実装モデルに渡す
+      CURRENT_STEP="reimpl (iteration ${iteration})"
+      REIMPL_PROMPT=$(expand_prompt "$REIMPL_TEMPLATE")
+      REIMPL_PROMPT="${REIMPL_PROMPT//\{review_feedback\}/$REVIEW_OUTPUT}"
+
+      echo "[runner] 🔧 再実装実行中..."
+      set +e
+      run_claude "$REIMPL_PROMPT" "$IMPL_MODEL" "$IMPL_TOOLS" "$IMPL_TURNS"
+      REIMPL_EXIT=$?
+      set -e
+
+      # 再実装履歴を保存
+      save_history "reimpl" "$IMPL_MODEL" "$REIMPL_PROMPT" "$RUN_CLAUDE_OUTPUT" "$REIMPL_EXIT" "iteration-${iteration}"
+
+      if [ $REIMPL_EXIT -ne 0 ]; then
+        echo "[runner] ⚠️ 再実装がエラーで終了 (exit: $REIMPL_EXIT) だが続行します"
+      fi
+
+      # 再実装の変更をコミット
+      commit_if_changed "$IMPL_PREFIX" "$REVIEW_TARGET" "review fix ${iteration}" || echo "[runner] ℹ️  再実装で変更なし"
+    done
+
+    continue
+  fi
+
+  # ============================================================
+  # 通常ステップの実行
+  # ============================================================
+  COMMIT_PREFIX=$(yq ".steps[$i].commit_prefix // \"chore\"" "$PIPELINE_FILE")
+  ALLOWED_TOOLS=$(yq ".steps[$i].allowed_tools // \"Edit,Write,Bash,Glob,Grep,Read\"" "$PIPELINE_FILE")
+  MAX_TURNS=$(yq ".steps[$i].max_turns // 30" "$PIPELINE_FILE")
+  SKIP_IF_NO_CHANGES=$(yq ".steps[$i].skip_if_no_changes // false" "$PIPELINE_FILE")
+  RETRY_ON_TEST_FAILURE=$(yq ".steps[$i].retry_on_test_failure // 0" "$PIPELINE_FILE")
+  CURRENT_MODEL=$(resolve_model "$i" "$STEP_NAME")
+
   # プロンプトテンプレートの取得と変数展開
   PROMPT_TEMPLATE=$(yq ".steps[$i].prompt_template" "$PIPELINE_FILE")
-
-  # git diff の取得
-  GIT_DIFF=$(git diff HEAD~1 2>/dev/null || echo "(初回コミットのため差分なし)")
-  GIT_DIFF_FROM_MAIN=$(git diff "${BASE_BRANCH}...HEAD" 2>/dev/null || echo "(差分なし)")
-
-  # 変数を展開
-  PROMPT="$PROMPT_TEMPLATE"
-  PROMPT="${PROMPT//\{issue_number\}/$ISSUE_NUMBER}"
-  PROMPT="${PROMPT//\{issue_title\}/$ISSUE_TITLE}"
-  PROMPT="${PROMPT//\{issue_body\}/$ISSUE_BODY}"
-  PROMPT="${PROMPT//\{git_diff\}/$GIT_DIFF}"
-  PROMPT="${PROMPT//\{git_diff_from_main\}/$GIT_DIFF_FROM_MAIN}"
+  PROMPT=$(expand_prompt "$PROMPT_TEMPLATE")
 
   # Claude Code で実行
   ATTEMPT=0
@@ -274,7 +526,6 @@ for i in $(seq 0 $((STEP_COUNT - 1))); do
 
     if [ "$ATTEMPT" -gt 1 ]; then
       echo "[runner] リトライ ${ATTEMPT}/${MAX_ATTEMPTS}"
-      # リトライ時は失敗理由を追加
       PROMPT="$PROMPT
 
 前回の実行でテストが失敗しました。テストの失敗を修正してください。"
@@ -282,15 +533,17 @@ for i in $(seq 0 $((STEP_COUNT - 1))); do
 
     echo "[runner] Claude Code を実行中... (model: $CURRENT_MODEL, max_turns: $MAX_TURNS)"
 
-    # claude -p で非対話実行
     set +e
-    claude -p "$PROMPT" \
-      --model "$CURRENT_MODEL" \
-      --allowedTools "$ALLOWED_TOOLS" \
-      --max-turns "$MAX_TURNS" \
-      2>&1
+    STEP_OUTPUT=$(run_claude "$PROMPT" "$CURRENT_MODEL" "$ALLOWED_TOOLS" "$MAX_TURNS")
     CLAUDE_EXIT=$?
     set -e
+
+    echo "$STEP_OUTPUT"
+
+    # 履歴を保存
+    local retry_label=""
+    [ "$ATTEMPT" -gt 1 ] && retry_label="retry-${ATTEMPT}"
+    save_history "$STEP_NAME" "$CURRENT_MODEL" "$PROMPT" "$STEP_OUTPUT" "$CLAUDE_EXIT" "$retry_label"
 
     if [ "$CLAUDE_EXIT" -ne 0 ] && [ "$RETRY_ON_TEST_FAILURE" -gt 0 ] && [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; then
       echo "[runner] ⚠️ Claude Code がエラーで終了 (exit: $CLAUDE_EXIT)。リトライします"
@@ -322,7 +575,7 @@ echo ""
 echo "[runner] === Push & PR 作成 ==="
 CURRENT_STEP="push-and-pr"
 
-git push origin "$BRANCH_NAME"
+git push -u origin "$BRANCH_NAME"
 echo "[runner] ✅ Push完了: $BRANCH_NAME"
 
 # PR 作成

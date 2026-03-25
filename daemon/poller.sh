@@ -48,8 +48,8 @@ for i in $(seq 0 $((REPO_COUNT - 1))); do
   REPO=$(yq ".repositories[$i].repo" "$CONFIG")
   REPO_STATUS=$(yq ".repositories[$i].status // \"active\"" "$CONFIG")
   PIPELINE=$(yq ".repositories[$i].pipeline // \"default\"" "$CONFIG")
-  BRANCH_PREFIX=$(yq ".repositories[$i].branch_prefix // \"feat/\"" "$CONFIG")
-  BASE_BRANCH=$(yq ".repositories[$i].base_branch // \"main\"" "$CONFIG")
+  BRANCH_PREFIX=$(yq ".repositories[$i].branch_prefix // \"feature/\"" "$CONFIG")
+  BASE_BRANCH=$(yq ".repositories[$i].base_branch // \"develop\"" "$CONFIG")
 
   # 一時停止中のリポジトリはスキップ
   if [ "$REPO_STATUS" = "paused" ]; then
@@ -89,6 +89,10 @@ for i in $(seq 0 $((REPO_COUNT - 1))); do
       continue
     fi
 
+    # Issue body からブランチ指定を抽出
+    # 対応フォーマット: "branch: xxx" または "ブランチ: xxx"（行頭）
+    SPECIFIED_BRANCH=$(echo "$ISSUE_BODY" | grep -iE '^\s*(branch|ブランチ)\s*[:：]\s*' | head -1 | sed -E 's/^\s*(branch|ブランチ)\s*[:：]\s*//' | tr -d '[:space:]' || echo "")
+
     # ジョブをキューに追加
     jq -n \
       --arg repo "$REPO" \
@@ -99,6 +103,7 @@ for i in $(seq 0 $((REPO_COUNT - 1))); do
       --arg pipeline "$PIPELINE" \
       --arg branch_prefix "$BRANCH_PREFIX" \
       --arg base_branch "$BASE_BRANCH" \
+      --arg specified_branch "$SPECIFIED_BRANCH" \
       --arg status "queued" \
       --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       '{
@@ -110,6 +115,7 @@ for i in $(seq 0 $((REPO_COUNT - 1))); do
         pipeline: $pipeline,
         branch_prefix: $branch_prefix,
         base_branch: $base_branch,
+        specified_branch: $specified_branch,
         status: $status,
         created_at: $created_at
       }' > "$QUEUE_DIR/${JOB_ID}.json"
