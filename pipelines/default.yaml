@@ -1,5 +1,5 @@
 # デフォルトパイプライン定義
-# implement ⇄ review（最大3回） → test → docs
+# [ [実装 → テストコード実装 → テスト実施](テスト失敗→実装修正) → レビュー ] x 最大3回(LGTM終了) → docs
 
 name: "default"
 description: "標準的な実装パイプライン"
@@ -28,11 +28,62 @@ steps:
     max_turns: 50
 
   - name: "review"
-    description: "実装コードのレビュー（問題点の指摘のみ、コード修正は行わない）"
+    description: "[実装→テスト→レビュー]ループ（最大3回、LGTM で終了）"
     # model: "claude-opus-4-6"  # レビューは深い推論ができるモデル推奨
     review_mode: "feedback_only"
     max_iterations: 3
     review_target: "implement"
+
+    # --- Phase 1: テストコード実装＆テスト実施（レビュー前に毎回実行） ---
+    test_before_review: true
+    test_prompt_template: |
+      あなたはテストエンジニアです。
+      以下の変更に対するテストコードを作成し、テストを実行してください。
+
+      ## 変更差分（mainブランチからの差分）
+      ```
+      {git_diff_from_main}
+      ```
+
+      ## 指示
+      - 既存のテストフレームワーク・テストパターンに従ってください
+      - テストフレームワークが存在しない場合は、言語に適したものをセットアップしてください
+      - 正常系・異常系・境界値をカバーしてください
+      - テストを実行して全てパスすることを確認してください
+      - テストが失敗した場合はその内容を報告してください（テストコード自体は正しい前提で）
+    test_allowed_tools: "Edit,Write,Bash,Glob,Grep,Read"
+    test_max_turns: 40
+    test_commit_prefix: "test"
+
+    # --- Phase 1.5: テスト失敗時の実装修正 ---
+    # テスト実施が失敗した場合、実装コードを修正してテストを再実行する
+    test_fix_max_retries: 3
+    test_fix_prompt_template: |
+      あなたはソフトウェアエンジニアです。
+      テストが失敗しています。実装コードを修正してテストをパスさせてください。
+
+      ## 元の Issue #{issue_number}: {issue_title}
+      {issue_body}
+
+      ## 現在の変更差分（ベースブランチからの差分）
+      ```
+      {git_diff_from_main}
+      ```
+
+      ## 前回のテスト結果
+      {test_output}
+
+      ## 指示
+      - テストコードは正しい前提で、実装コードを修正してください
+      - テストコードの変更は最小限にしてください（テスト自体のバグの場合のみ）
+      - 修正後、テストを再実行して全てパスすることを確認してください
+      - CLAUDE.md があればそのルールに従ってください
+      - Antigravity の rule.md があればそのルールにも従ってください
+    test_fix_allowed_tools: "Edit,Write,Bash,Glob,Grep,Read"
+    test_fix_max_turns: 40
+    test_fix_commit_prefix: "fix"
+
+    # --- Phase 2: レビュー（読み取り専用） ---
     prompt_template: |
       あなたはシニアコードレビュアーです。
       以下の変更差分をレビューし、問題点を書き出してください。
@@ -60,6 +111,10 @@ steps:
       - [重要度: high/medium/low] ファイル名:行番号 - 問題の説明と修正案
       - [重要度: high/medium/low] ファイル名:行番号 - 問題の説明と修正案
       ...
+    allowed_tools: "Glob,Grep,Read"
+    max_turns: 30
+
+    # --- Phase 3: レビュー指摘に基づく再実装（NEEDS_FIX の場合） ---
     reimpl_prompt_template: |
       あなたはソフトウェアエンジニアです。
       以下のレビュー指摘事項に基づいて、コードを修正してください。
@@ -81,31 +136,6 @@ steps:
       - CLAUDE.md があればそのルールに従ってください
       - Antigravity の rule.md があればそのルールにも従ってください
       - セキュリティ脆弱性を作り込まないでください
-    allowed_tools: "Glob,Grep,Read"
-    max_turns: 30
-
-  - name: "test"
-    description: "テストの作成と実行"
-    # model: "claude-sonnet-4-6"  # テスト生成は Sonnet で十分
-    prompt_template: |
-      あなたはテストエンジニアです。
-      以下の変更に対するテストを作成・実行してください。
-
-      ## 変更差分（mainブランチからの差分）
-      ```
-      {git_diff_from_main}
-      ```
-
-      ## 指示
-      - 既存のテストフレームワーク・テストパターンに従ってください
-      - テストフレームワークが存在しない場合は、言語に適したものをセットアップしてください
-      - 正常系・異常系・境界値をカバーしてください
-      - テストを実行して全てパスすることを確認してください
-      - テストが失敗したら修正してください
-    commit_prefix: "test"
-    allowed_tools: "Edit,Write,Bash,Glob,Grep,Read"
-    max_turns: 40
-    retry_on_test_failure: 3
 
   - name: "docs"
     description: "ドキュメントの更新"

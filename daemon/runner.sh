@@ -409,7 +409,7 @@ for i in $(seq 0 $((STEP_COUNT - 1))); do
   jq --arg step "$STEP_NAME" '.current_step = $step' "$JOB_FILE" > "${JOB_FILE}.tmp" && mv "${JOB_FILE}.tmp" "$JOB_FILE"
 
   # ============================================================
-  # review_mode: feedback_only — 実装⇄レビューループ
+  # review_mode: feedback_only — [実装→テスト→レビュー] ループ
   # ============================================================
   if [ "$REVIEW_MODE" = "feedback_only" ]; then
     MAX_ITERATIONS=$(yq ".steps[$i].max_iterations // 3" "$PIPELINE_FILE")
@@ -438,12 +438,101 @@ for i in $(seq 0 $((STEP_COUNT - 1))); do
     IMPL_PREFIX=$(yq ".steps[$TARGET_INDEX].commit_prefix // \"feat\"" "$PIPELINE_FILE")
     REIMPL_TEMPLATE=$(yq ".steps[$i].reimpl_prompt_template // \"\"" "$PIPELINE_FILE")
 
+    # テスト設定の読み込み
+    TEST_BEFORE_REVIEW=$(yq ".steps[$i].test_before_review // false" "$PIPELINE_FILE")
+    if [ "$TEST_BEFORE_REVIEW" = "true" ]; then
+      TEST_PROMPT_TEMPLATE=$(yq ".steps[$i].test_prompt_template" "$PIPELINE_FILE")
+      TEST_TOOLS=$(yq ".steps[$i].test_allowed_tools // \"Edit,Write,Bash,Glob,Grep,Read\"" "$PIPELINE_FILE")
+      TEST_TURNS=$(yq ".steps[$i].test_max_turns // 40" "$PIPELINE_FILE")
+      TEST_PREFIX=$(yq ".steps[$i].test_commit_prefix // \"test\"" "$PIPELINE_FILE")
+      TEST_MODEL=$(resolve_model "$i" "test")
+      # 環境変数 CLAUDE_MODEL_TEST があればそちらを優先
+      if [ -n "${CLAUDE_MODEL_TEST:-}" ]; then
+        TEST_MODEL="$CLAUDE_MODEL_TEST"
+      fi
+      TEST_FIX_MAX_RETRIES=$(yq ".steps[$i].test_fix_max_retries // 3" "$PIPELINE_FILE")
+      TEST_FIX_TEMPLATE=$(yq ".steps[$i].test_fix_prompt_template // \"\"" "$PIPELINE_FILE")
+      TEST_FIX_TOOLS=$(yq ".steps[$i].test_fix_allowed_tools // \"Edit,Write,Bash,Glob,Grep,Read\"" "$PIPELINE_FILE")
+      TEST_FIX_TURNS=$(yq ".steps[$i].test_fix_max_turns // 40" "$PIPELINE_FILE")
+      TEST_FIX_PREFIX=$(yq ".steps[$i].test_fix_commit_prefix // \"fix\"" "$PIPELINE_FILE")
+    fi
+
     for iteration in $(seq 1 "$MAX_ITERATIONS"); do
       echo ""
-      echo "[runner] --- レビューイテレーション ${iteration}/${MAX_ITERATIONS} ---"
+      echo "[runner] === イテレーション ${iteration}/${MAX_ITERATIONS} ==="
+
+      # -------------------------------------------------------
+      # Phase 1: テストコード実装 & テスト実施
+      # -------------------------------------------------------
+      if [ "$TEST_BEFORE_REVIEW" = "true" ]; then
+        CURRENT_STEP="test (iteration ${iteration})"
+        echo "[runner] 🧪 テストコード実装 & テスト実施..."
+
+        TEST_PROMPT=$(expand_prompt "$TEST_PROMPT_TEMPLATE")
+
+        set +e
+        TEST_OUTPUT=$(run_claude "$TEST_PROMPT" "$TEST_MODEL" "$TEST_TOOLS" "$TEST_TURNS")
+        TEST_EXIT=$?
+        set -e
+
+        echo "$TEST_OUTPUT"
+
+        # テスト履歴を保存
+        save_history "test" "$TEST_MODEL" "$TEST_PROMPT" "$TEST_OUTPUT" "$TEST_EXIT" "iteration-${iteration}"
+
+        # テスト変更をコミット
+        commit_if_changed "$TEST_PREFIX" "test" "iteration ${iteration}" || echo "[runner] ℹ️  テストで変更なし"
+
+        # Phase 1.5: テスト失敗時の実装修正ループ
+        if [ "$TEST_EXIT" -ne 0 ] && [ "$TEST_FIX_MAX_RETRIES" -gt 0 ]; then
+          LAST_TEST_OUTPUT="$TEST_OUTPUT"
+
+          for fix_attempt in $(seq 1 "$TEST_FIX_MAX_RETRIES"); do
+            echo ""
+            echo "[runner] 🔧 テスト失敗 → 実装修正 (リトライ ${fix_attempt}/${TEST_FIX_MAX_RETRIES})"
+            CURRENT_STEP="test-fix (iteration ${iteration}, retry ${fix_attempt})"
+
+            # 実装修正プロンプトを構築
+            FIX_PROMPT=$(expand_prompt "$TEST_FIX_TEMPLATE")
+            FIX_PROMPT="${FIX_PROMPT//\{test_output\}/$LAST_TEST_OUTPUT}"
+
+            set +e
+            FIX_OUTPUT=$(run_claude "$FIX_PROMPT" "$IMPL_MODEL" "$TEST_FIX_TOOLS" "$TEST_FIX_TURNS")
+            FIX_EXIT=$?
+            set -e
+
+            echo "$FIX_OUTPUT"
+
+            # 実装修正履歴を保存
+            save_history "test-fix" "$IMPL_MODEL" "$FIX_PROMPT" "$FIX_OUTPUT" "$FIX_EXIT" "iteration-${iteration}-retry-${fix_attempt}"
+
+            # 実装修正の変更をコミット
+            commit_if_changed "$TEST_FIX_PREFIX" "test-fix" "iteration ${iteration} retry ${fix_attempt}" || echo "[runner] ℹ️  実装修正で変更なし"
+
+            # 修正が成功した場合（Claude が正常終了）はテスト通過とみなす
+            if [ "$FIX_EXIT" -eq 0 ]; then
+              echo "[runner] ✅ 実装修正 & テスト通過 (リトライ ${fix_attempt})"
+              TEST_EXIT=0
+              break
+            fi
+
+            LAST_TEST_OUTPUT="$FIX_OUTPUT"
+            echo "[runner] ⚠️ 実装修正後もテスト失敗 (exit: $FIX_EXIT)"
+          done
+
+          if [ "$TEST_EXIT" -ne 0 ]; then
+            echo "[runner] ⚠️ テスト修正の最大リトライ (${TEST_FIX_MAX_RETRIES}) に達しました。テスト失敗が残っている可能性があります"
+          fi
+        elif [ "$TEST_EXIT" -ne 0 ]; then
+          echo "[runner] ⚠️ テストがエラーで終了 (exit: $TEST_EXIT) だが続行します"
+        fi
+      fi
+
+      # -------------------------------------------------------
+      # Phase 2: レビュー（読み取り専用）
+      # -------------------------------------------------------
       CURRENT_STEP="review (iteration ${iteration})"
 
-      # レビュー実行（読み取り専用）
       REVIEW_PROMPT_TEMPLATE=$(yq ".steps[$i].prompt_template" "$PIPELINE_FILE")
       REVIEW_PROMPT=$(expand_prompt "$REVIEW_PROMPT_TEMPLATE")
 
@@ -462,7 +551,7 @@ for i in $(seq 0 $((STEP_COUNT - 1))); do
         echo "[runner] ⚠️ レビューがエラーで終了 (exit: $REVIEW_EXIT) だが続行します"
       fi
 
-      # レビュー結果の判定: 先頭行が LGTM なら問題なし
+      # レビュー結果の判定: LGTM なら問題なし
       FIRST_LINE=$(echo "$REVIEW_OUTPUT" | grep -E '^\s*(LGTM|NEEDS_FIX)' | head -1 | tr -d '[:space:]')
 
       if [ "$FIRST_LINE" = "LGTM" ]; then
@@ -470,7 +559,7 @@ for i in $(seq 0 $((STEP_COUNT - 1))); do
         break
       fi
 
-      echo "[runner] 🔄 レビューで問題を検出、再実装を実行します"
+      echo "[runner] 🔄 レビューで問題を検出"
 
       # 最終イテレーションの場合は再実装せず警告のみ
       if [ "$iteration" -eq "$MAX_ITERATIONS" ]; then
@@ -478,7 +567,9 @@ for i in $(seq 0 $((STEP_COUNT - 1))); do
         break
       fi
 
-      # 再実装: レビュー指摘をフィードバックとして実装モデルに渡す
+      # -------------------------------------------------------
+      # Phase 3: レビュー指摘に基づく再実装
+      # -------------------------------------------------------
       CURRENT_STEP="reimpl (iteration ${iteration})"
       REIMPL_PROMPT=$(expand_prompt "$REIMPL_TEMPLATE")
       REIMPL_PROMPT="${REIMPL_PROMPT//\{review_feedback\}/$REVIEW_OUTPUT}"
@@ -498,6 +589,8 @@ for i in $(seq 0 $((STEP_COUNT - 1))); do
 
       # 再実装の変更をコミット
       commit_if_changed "$IMPL_PREFIX" "$REVIEW_TARGET" "review fix ${iteration}" || echo "[runner] ℹ️  再実装で変更なし"
+
+      # 次のイテレーションで再度テスト→レビューが実行される
     done
 
     continue
@@ -541,7 +634,7 @@ for i in $(seq 0 $((STEP_COUNT - 1))); do
     echo "$STEP_OUTPUT"
 
     # 履歴を保存
-    local retry_label=""
+    retry_label=""
     [ "$ATTEMPT" -gt 1 ] && retry_label="retry-${ATTEMPT}"
     save_history "$STEP_NAME" "$CURRENT_MODEL" "$PROMPT" "$STEP_OUTPUT" "$CLAUDE_EXIT" "$retry_label"
 

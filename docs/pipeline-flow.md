@@ -9,10 +9,10 @@ GitHub Issue に `auto-implement` ラベルが付与されてから PR が作成
 1. [全体フロー概要](#1-全体フロー概要)
 2. [Step 0: リポジトリのクローン](#2-step-0-リポジトリのクローン)
 3. [Step 0.5: スキル発見・CLAUDE.md 合成](#3-step-05-スキル発見claudemd-合成)
-4. [Step 1+2: implement ⇄ review ループ](#4-step-12-implement--review-ループ)
-5. [Step 3: test（テスト）](#5-step-3-testテスト)
-6. [Step 4: docs（ドキュメント更新）](#6-step-4-docsドキュメント更新)
-7. [Step 5: Push & PR 作成](#7-step-5-push--pr-作成)
+4. [Step 1: implement（初回実装）](#4-step-1-implement初回実装)
+5. [Step 2: [テスト → レビュー → 再実装] ループ](#5-step-2-テスト--レビュー--再実装-ループ)
+6. [Step 3: docs（ドキュメント更新）](#6-step-3-docsドキュメント更新)
+7. [Step 4: Push & PR 作成](#7-step-4-push--pr-作成)
 8. [失敗時の処理](#8-失敗時の処理)
 9. [モデル解決の優先順位](#9-モデル解決の優先順位)
 10. [プロンプト変数一覧](#10-プロンプト変数一覧)
@@ -35,13 +35,14 @@ GitHub Issue (auto-implement ラベル)
        ▼ runner.sh（パイプライン実行エンジン）
        ├─ Step 0    : リポジトリのクローン & ブランチ決定
        ├─ Step 0.5  : スキル発見 & CLAUDE.md 合成
-       ├─ Step 1+2  : implement ⇄ review ループ（最大3回）
-       │    ├─ implement（実装）  ← Claude Code CLI
-       │    ├─ review（指摘のみ） ← Claude Code CLI（読取専用）
-       │    └─ 問題あり → 再実装 → 再レビュー ...（LGTM まで）
-       ├─ Step 3    : test（テスト）           ← Claude Code CLI
-       ├─ Step 4    : docs（ドキュメント更新） ← Claude Code CLI
-       └─ Step 5    : Push & PR 作成
+       ├─ Step 1    : implement（初回実装）         ← Claude Code CLI
+       ├─ Step 2    : [テスト → レビュー → 再実装] ループ（最大3回）
+       │    ├─ テストコード実装 & テスト実施        ← Claude Code CLI
+       │    │    └─ テスト失敗 → 実装修正 & 再テスト（最大3回リトライ）
+       │    ├─ レビュー（指摘のみ、読取専用）       ← Claude Code CLI
+       │    └─ NEEDS_FIX → 再実装 → 次のイテレーションへ
+       ├─ Step 3    : docs（ドキュメント更新）       ← Claude Code CLI
+       └─ Step 4    : Push & PR 作成
        │
        ▼ notifier.sh
   Discord 通知（成功 / 失敗）
@@ -52,7 +53,7 @@ GitHub Issue (auto-implement ラベル)
 | ファイル | 役割 |
 |----------|------|
 | `daemon/runner.sh` | パイプライン実行エンジン本体 |
-| `pipelines/default.yaml` | 4 ステップのプロンプト定義 |
+| `pipelines/default.yaml` | ステップのプロンプト定義 |
 | `daemon/poller.sh` | GitHub Issue のポーリング |
 | `daemon/scheduler.sh` | ジョブのスケジューリング・排他制御 |
 | `daemon/skill-discovery.sh` | 技術スタック検出・スキル選定 |
@@ -134,31 +135,9 @@ branch: feature/my-custom-branch
 
 ---
 
-## 4. Step 1+2: implement ⇄ review ループ
+## 4. Step 1: implement（初回実装）
 
-実装とレビューは **最大 3 回のイテレーション** でループします。
-レビューステップはコードを修正せず、問題点の指摘のみを行います。指摘があれば実装モデルに渡して再実装し、再度レビューします。
-
-```
-implement（初回実装）
-    │
-    ▼
-review（問題点を指摘、コード修正なし）
-    │
-    ├─ LGTM → ループ終了、次のステップへ
-    │
-    └─ NEEDS_FIX → レビュー指摘を実装モデルに渡す
-         │
-         ▼
-    re-implement（指摘に基づく修正）
-         │
-         ▼
-    review（再レビュー）
-         │
-         └─ ... 最大 3 回まで繰り返し
-```
-
-### 4.1 implement プロンプト（初回実装）
+### プロンプト
 
 ```
 あなたはソフトウェアエンジニアです。
@@ -184,7 +163,101 @@ review（問題点を指摘、コード修正なし）
 | `max_turns` | `50` |
 | 推奨モデル | グローバル設定に従う |
 
-### 4.2 review プロンプト（問題点の指摘のみ）
+---
+
+## 5. Step 2: [テスト → レビュー → 再実装] ループ
+
+実装後、**テスト → レビュー → 再実装** を **最大 3 回のイテレーション** でループします。
+
+```
+イテレーション 1:
+    テストコード実装 & テスト実施
+        │
+        ├─ テスト通過 → そのまま進む
+        └─ テスト失敗 → 実装修正 & 再テスト（最大3回リトライ）
+        │
+        ▼
+    レビュー（問題点を指摘、コード修正なし）
+        │
+        ├─ LGTM → ループ終了、次のステップ（docs）へ
+        └─ NEEDS_FIX → 再実装
+             │
+             ▼
+イテレーション 2:
+    再実装後のテストコード実装 & テスト実施
+        │  ...（同上）
+        ▼
+    レビュー
+        │
+        ├─ LGTM → ループ終了
+        └─ NEEDS_FIX → 再実装
+             │
+             ▼
+イテレーション 3（最終）:
+    テストコード実装 & テスト実施 → レビュー
+        │
+        └─ LGTM でも NEEDS_FIX でもループ終了
+           （最終イテレーションでは再実装しない）
+```
+
+### 5.1 テストコード実装 & テスト実施プロンプト
+
+```
+あなたはテストエンジニアです。
+以下の変更に対するテストコードを作成し、テストを実行してください。
+
+## 変更差分（mainブランチからの差分）
+{git_diff_from_main}
+
+## 指示
+- 既存のテストフレームワーク・テストパターンに従ってください
+- テストフレームワークが存在しない場合は、言語に適したものをセットアップしてください
+- 正常系・異常系・境界値をカバーしてください
+- テストを実行して全てパスすることを確認してください
+- テストが失敗した場合はその内容を報告してください（テストコード自体は正しい前提で）
+```
+
+| 項目 | 値 |
+|------|-----|
+| `test_commit_prefix` | `test` |
+| `test_allowed_tools` | `Edit,Write,Bash,Glob,Grep,Read` |
+| `test_max_turns` | `40` |
+| 推奨モデル | Sonnet（テスト生成は Sonnet で十分） |
+
+### 5.2 テスト失敗時の実装修正プロンプト
+
+テストが失敗した場合、実装コードを修正してテストをパスさせます（最大 3 回リトライ）。
+
+```
+あなたはソフトウェアエンジニアです。
+テストが失敗しています。実装コードを修正してテストをパスさせてください。
+
+## 元の Issue #{issue_number}: {issue_title}
+{issue_body}
+
+## 現在の変更差分（ベースブランチからの差分）
+{git_diff_from_main}
+
+## 前回のテスト結果
+{test_output}
+
+## 指示
+- テストコードは正しい前提で、実装コードを修正してください
+- テストコードの変更は最小限にしてください（テスト自体のバグの場合のみ）
+- 修正後、テストを再実行して全てパスすることを確認してください
+- CLAUDE.md があればそのルールに従ってください
+- Antigravity の rule.md があればそのルールにも従ってください
+```
+
+| 項目 | 値 |
+|------|-----|
+| `test_fix_commit_prefix` | `fix` |
+| `test_fix_allowed_tools` | `Edit,Write,Bash,Glob,Grep,Read` |
+| `test_fix_max_turns` | `40` |
+| `test_fix_max_retries` | `3` |
+| モデル | implement ステップと同じモデルを使用 |
+
+### 5.3 レビュープロンプト（問題点の指摘のみ）
 
 ```
 あなたはシニアコードレビュアーです。
@@ -221,7 +294,7 @@ NEEDS_FIX
 | `max_iterations` | `3` |
 | 推奨モデル | Opus（深い推論ができるモデル推奨） |
 
-### 4.3 re-implement プロンプト（レビュー指摘に基づく再実装）
+### 5.4 再実装プロンプト（レビュー指摘に基づく再実装）
 
 レビューで `NEEDS_FIX` が返された場合、以下のプロンプトで実装モデルを再実行します:
 
@@ -252,66 +325,19 @@ NEEDS_FIX
 | `max_turns` | `50`（implement と同じ） |
 | コミット | `feat(#{N}): implement (review fix {iteration}) - {title}` |
 
-### 4.4 ループの動作
+### 5.5 ループの動作まとめ
 
 | イテレーション | 動作 |
 |---------------|------|
-| 1 回目 | review 実行 → LGTM ならループ終了、NEEDS_FIX なら re-implement → コミット |
-| 2 回目 | 再度 review → LGTM ならループ終了、NEEDS_FIX なら re-implement → コミット |
-| 3 回目（最終） | 再度 review → LGTM でも NEEDS_FIX でもループ終了（最終イテレーションでは再実装しない） |
+| 1 回目 | テスト実施(失敗→実装修正リトライ) → review → LGTM ならループ終了、NEEDS_FIX なら re-implement → コミット |
+| 2 回目 | テスト実施(失敗→実装修正リトライ) → review → LGTM ならループ終了、NEEDS_FIX なら re-implement → コミット |
+| 3 回目（最終） | テスト実施(失敗→実装修正リトライ) → review → LGTM でも NEEDS_FIX でもループ終了（最終イテレーションでは再実装しない） |
 
 > 最大イテレーション到達時に指摘が残っている場合、警告ログを出力して次のステップへ進みます。
 
 ---
 
-## 5. Step 3: test（テスト）
-
-### プロンプト
-
-```
-あなたはテストエンジニアです。
-以下の変更に対するテストを作成・実行してください。
-
-## 変更差分（mainブランチからの差分）
-{git_diff_from_main}
-
-## 指示
-- 既存のテストフレームワーク・テストパターンに従ってください
-- テストフレームワークが存在しない場合は、言語に適したものをセットアップしてください
-- 正常系・異常系・境界値をカバーしてください
-- テストを実行して全てパスすることを確認してください
-- テストが失敗したら修正してください
-```
-
-### リトライ時の追加プロンプト（2 回目以降）
-
-```
-前回の実行でテストが失敗しました。テストの失敗を修正してください。
-```
-
-> リトライ時は元のプロンプトの末尾にこのテキストが追加されます。
-
-### プロンプト以外の処理
-
-| 処理 | 内容 |
-|------|------|
-| Claude 実行 | `claude -p "$PROMPT" --model {model} --allowedTools "Edit,Write,Bash,Glob,Grep,Read" --max-turns 40` |
-| リトライ | Claude 実行が失敗した場合、最大 3 回リトライ（計 4 回試行） |
-| コミット | 変更があれば `git commit -m "test(#{N}): test - {title}"` |
-
-### 設定値
-
-| 項目 | 値 |
-|------|-----|
-| `commit_prefix` | `test` |
-| `allowed_tools` | `Edit,Write,Bash,Glob,Grep,Read` |
-| `max_turns` | `40` |
-| `retry_on_test_failure` | `3` |
-| 推奨モデル | Sonnet（テスト生成は Sonnet で十分、YAML コメントより） |
-
----
-
-## 6. Step 4: docs（ドキュメント更新）
+## 6. Step 3: docs（ドキュメント更新）
 
 ### プロンプト
 
@@ -350,7 +376,7 @@ NEEDS_FIX
 
 ---
 
-## 7. Step 5: Push & PR 作成
+## 7. Step 4: Push & PR 作成
 
 > プロンプトなし — Git 操作と GitHub API のみ
 
@@ -373,8 +399,8 @@ Issue #{issue_number} の自動実装
 
 ## 変更内容
 - feat(#N): implement - {title}
-- refactor(#N): review - {title}
 - test(#N): test - {title}
+- fix(#N): test-fix - {title}
 - docs(#N): docs - {title}
 （git log から最大20件のコミットメッセージを一覧）
 
@@ -424,7 +450,7 @@ Closes #{issue_number}
 | 優先度 | 設定元 | 例 |
 |--------|--------|-----|
 | 1 | ステップ YAML の `model` | `pipelines/default.yaml` の `steps[].model` |
-| 2 | 環境変数 `CLAUDE_MODEL_{STEP}` | `CLAUDE_MODEL_IMPLEMENT`, `CLAUDE_MODEL_REVIEW` 等 |
+| 2 | 環境変数 `CLAUDE_MODEL_{STEP}` | `CLAUDE_MODEL_IMPLEMENT`, `CLAUDE_MODEL_REVIEW`, `CLAUDE_MODEL_TEST` 等 |
 | 3 | リポジトリ固有設定 | `config.yaml` の `repositories[].claude_model` |
 | 4 | 環境変数 `CLAUDE_MODEL` | `.env` の `CLAUDE_MODEL` |
 | 5 | グローバル設定 | `config.yaml` の `global.claude.model` |
@@ -438,12 +464,13 @@ Closes #{issue_number}
 
 | 変数 | 展開元 | 使用ステップ |
 |------|--------|--------------|
-| `{issue_number}` | ジョブ JSON の `issue_number` | implement |
-| `{issue_title}` | ジョブ JSON の `issue_title` | implement |
-| `{issue_body}` | ジョブ JSON の `issue_body` | implement |
+| `{issue_number}` | ジョブ JSON の `issue_number` | implement, reimpl, test-fix |
+| `{issue_title}` | ジョブ JSON の `issue_title` | implement, reimpl, test-fix |
+| `{issue_body}` | ジョブ JSON の `issue_body` | implement, reimpl, test-fix |
 | `{git_diff}` | `git diff HEAD~1` | （未使用だが利用可能） |
-| `{git_diff_from_main}` | `git diff {base_branch}...HEAD` | review, re-implement, test, docs |
-| `{review_feedback}` | review ステップの出力（レビュー指摘事項） | re-implement |
+| `{git_diff_from_main}` | `git diff {base_branch}...HEAD` | test, test-fix, review, reimpl, docs |
+| `{review_feedback}` | review ステップの出力（レビュー指摘事項） | reimpl |
+| `{test_output}` | test ステップの出力（テスト結果） | test-fix |
 
 > `{git_diff_from_main}` は各ステップ・各イテレーション実行直前に再取得されるため、直前のコミット内容が反映されます。
 
@@ -502,10 +529,12 @@ workspace/.history/{repo_name}/
 ```
 workspace/.history/my-app/
   20260325-143022_issue-42_implement.json
-  20260325-143155_issue-42_review_iteration-1.json
-  20260325-143301_issue-42_reimpl_iteration-1.json
-  20260325-143422_issue-42_review_iteration-2.json
-  20260325-143530_issue-42_test.json
+  20260325-143155_issue-42_test_iteration-1.json
+  20260325-143250_issue-42_test-fix_iteration-1-retry-1.json
+  20260325-143330_issue-42_review_iteration-1.json
+  20260325-143422_issue-42_reimpl_iteration-1.json
+  20260325-143500_issue-42_test_iteration-2.json
+  20260325-143545_issue-42_review_iteration-2.json
   20260325-143612_issue-42_docs.json
 ```
 
