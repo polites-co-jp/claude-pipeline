@@ -450,7 +450,7 @@ for i in $(seq 0 $((STEP_COUNT - 1))); do
       if [ -n "${CLAUDE_MODEL_TEST:-}" ]; then
         TEST_MODEL="$CLAUDE_MODEL_TEST"
       fi
-      TEST_FIX_MAX_RETRIES=$(yq ".steps[$i].test_fix_max_retries // 0" "$PIPELINE_FILE")  # 0 = 無制限
+      TEST_FIX_MAX_RETRIES=$(yq ".steps[$i].test_fix_max_retries // 5" "$PIPELINE_FILE")
       TEST_FIX_TEMPLATE=$(yq ".steps[$i].test_fix_prompt_template // \"\"" "$PIPELINE_FILE")
       TEST_FIX_TOOLS=$(yq ".steps[$i].test_fix_allowed_tools // \"Edit,Write,Bash,Glob,Grep,Read\"" "$PIPELINE_FILE")
       TEST_FIX_TURNS=$(yq ".steps[$i].test_fix_max_turns // 40" "$PIPELINE_FILE")
@@ -483,27 +483,13 @@ for i in $(seq 0 $((STEP_COUNT - 1))); do
         # テスト変更をコミット
         commit_if_changed "$TEST_PREFIX" "test" "iteration ${iteration}" || echo "[runner] ℹ️  テストで変更なし"
 
-        # Phase 1.5: テスト失敗時の実装修正ループ（無制限リトライ: 0 = 無制限）
+        # Phase 1.5: テスト失敗時の実装修正ループ（最大 test_fix_max_retries 回、超過で失敗終了）
         if [ "$TEST_EXIT" -ne 0 ]; then
           LAST_TEST_OUTPUT="$TEST_OUTPUT"
-          fix_attempt=0
 
-          while true; do
-            fix_attempt=$((fix_attempt + 1))
-
-            # 有限リトライの場合の上限チェック
-            if [ "$TEST_FIX_MAX_RETRIES" -gt 0 ] && [ "$fix_attempt" -gt "$TEST_FIX_MAX_RETRIES" ]; then
-              echo "[runner] ⚠️ テスト修正の最大リトライ (${TEST_FIX_MAX_RETRIES}) に達しました"
-              break
-            fi
-
-            if [ "$TEST_FIX_MAX_RETRIES" -eq 0 ]; then
-              echo ""
-              echo "[runner] 🔧 テスト失敗 → 実装修正 (リトライ ${fix_attempt})"
-            else
-              echo ""
-              echo "[runner] 🔧 テスト失敗 → 実装修正 (リトライ ${fix_attempt}/${TEST_FIX_MAX_RETRIES})"
-            fi
+          for fix_attempt in $(seq 1 "$TEST_FIX_MAX_RETRIES"); do
+            echo ""
+            echo "[runner] 🔧 テスト失敗 → 実装修正 (リトライ ${fix_attempt}/${TEST_FIX_MAX_RETRIES})"
             CURRENT_STEP="test-fix (iteration ${iteration}, retry ${fix_attempt})"
 
             # 実装修正プロンプトを構築
@@ -533,16 +519,14 @@ for i in $(seq 0 $((STEP_COUNT - 1))); do
             LAST_TEST_OUTPUT="$FIX_OUTPUT"
             echo "[runner] ⚠️ 実装修正後もテスト失敗 (exit: $FIX_EXIT)"
           done
-        fi
-      fi
 
-      # -------------------------------------------------------
-      # テスト未通過ならレビューをスキップ
-      # -------------------------------------------------------
-      if [ "${TEST_EXIT:-0}" -ne 0 ]; then
-        echo "[runner] ⏭️ テスト未通過のためレビューをスキップします"
-        echo "[runner] ❌ テストが通過しないためパイプラインを中断します"
-        exit 1
+          # リトライ上限に達してもテスト未通過 → パイプライン失敗
+          if [ "$TEST_EXIT" -ne 0 ]; then
+            CURRENT_STEP="test-fix (iteration ${iteration})"
+            echo "[runner] ❌ テスト修正が ${TEST_FIX_MAX_RETRIES} 回失敗しました。パイプラインを失敗終了します"
+            exit 1
+          fi
+        fi
       fi
 
       # -------------------------------------------------------
