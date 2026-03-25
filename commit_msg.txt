@@ -1,7 +1,0 @@
-feat: 各種設定ファイル、デーモンスクリプト、およびWeb機能の更新
-
-- CLAUDE.mdへのプロンプトルール追加
-- config.yaml.exampleおよびdefault.yamlの更新
-- poller.sh, runner.sh, cli.sh, setup.shのスクリプト改善
-- Web UI (app.js, index.html) およびサーバー (server.js) の修正
-- docs/pipeline-flow.mdのドキュメント更新
