@@ -12,7 +12,7 @@ GitHub Issue に `auto-implement` ラベルが付与されてから PR が作成
 4. [Step 1: implement（初回実装）](#4-step-1-implement初回実装)
 5. [Step 2: [テスト → レビュー → 再実装] ループ](#5-step-2-テスト--レビュー--再実装-ループ)
 6. [Step 3: docs（ドキュメント更新）](#6-step-3-docsドキュメント更新)
-7. [Step 4: Push & PR 作成](#7-step-4-push--pr-作成)
+7. [Step 4: PR 作成](#7-step-4-pr-作成)
 8. [失敗時の処理](#8-失敗時の処理)
 9. [モデル解決の優先順位](#9-モデル解決の優先順位)
 10. [プロンプト変数一覧](#10-プロンプト変数一覧)
@@ -43,7 +43,7 @@ GitHub Issue (auto-implement ラベル)
        │    ├─ レビュー（指摘のみ、読取専用）       ← Claude Code CLI
        │    └─ NEEDS_FIX → 再実装 → 次のイテレーションへ
        ├─ Step 3    : docs（ドキュメント更新）       ← Claude Code CLI
-       └─ Step 4    : Push & PR 作成
+       └─ Step 4    : PR 作成（各ステップで都度 push 済み）
        │
        ▼ notifier.sh
   Discord 通知（成功 / 失敗）
@@ -380,15 +380,18 @@ NEEDS_FIX
 
 ---
 
-## 7. Step 4: Push & PR 作成
+## 7. Step 4: PR 作成
 
 > プロンプトなし — Git 操作と GitHub API のみ
+>
+> **注意:** 各ステップ（実装・テスト作成・ドキュメント作成等）でコミット & プッシュは都度実行されます。
+> このステップでは未プッシュのコミットがあれば最終プッシュし、PR を作成します。
 
 ### 処理一覧
 
 | 処理 | 内容 |
 |------|------|
-| Push | `git push origin {branch_name}` |
+| 最終 Push | 未プッシュのコミットがあれば `git push origin {branch_name}` |
 | PR 作成 | `gh pr create` で PR を作成（本文は自動生成） |
 | ラベル更新 | Issue の `auto-implement` ラベルを `auto-implemented` に差し替え |
 | ジョブ完了記録 | ジョブ JSON の `status` を `completed` に更新、`pr_url` を記録 |

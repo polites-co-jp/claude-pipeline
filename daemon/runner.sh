@@ -379,7 +379,7 @@ save_history() {
   fi
 }
 
-# --- ヘルパー関数: 変更のコミット ---
+# --- ヘルパー関数: 変更のコミット & プッシュ ---
 commit_if_changed() {
   local prefix="$1"
   local step_name="$2"
@@ -390,6 +390,8 @@ commit_if_changed() {
     [ -n "$label" ] && msg="${prefix}(#${ISSUE_NUMBER}): ${step_name} (${label}) - ${ISSUE_TITLE}"
     git commit -m "$msg"
     echo "[runner] ✅ コミット: $msg"
+    git push -u origin "$BRANCH_NAME"
+    echo "[runner] ✅ プッシュ: $BRANCH_NAME"
     return 0
   fi
   return 1
@@ -649,12 +651,14 @@ for i in $(seq 0 $((STEP_COUNT - 1))); do
     break
   done
 
-  # 変更があればコミット
+  # 変更があればコミット & プッシュ
   if [ -n "$(git status --porcelain)" ]; then
     git add -A
     COMMIT_MSG="${COMMIT_PREFIX}(#${ISSUE_NUMBER}): ${STEP_NAME} - ${ISSUE_TITLE}"
     git commit -m "$COMMIT_MSG"
     echo "[runner] ✅ コミット: $COMMIT_MSG"
+    git push -u origin "$BRANCH_NAME"
+    echo "[runner] ✅ プッシュ: $BRANCH_NAME"
   else
     if [ "$SKIP_IF_NO_CHANGES" = "true" ]; then
       echo "[runner] ℹ️  変更なし、スキップ"
@@ -666,11 +670,16 @@ done
 
 # === 4. Push & PR 作成 ===
 echo ""
-echo "[runner] === Push & PR 作成 ==="
+echo "[runner] === PR 作成 ==="
 CURRENT_STEP="push-and-pr"
 
-git push -u origin "$BRANCH_NAME"
-echo "[runner] ✅ Push完了: $BRANCH_NAME"
+# 各ステップで都度プッシュ済みだが、未プッシュのコミットがあれば最終プッシュ
+if [ -n "$(git log origin/$BRANCH_NAME..HEAD 2>/dev/null)" ]; then
+  git push -u origin "$BRANCH_NAME"
+  echo "[runner] ✅ 最終Push完了: $BRANCH_NAME"
+else
+  echo "[runner] ℹ️  全コミットはプッシュ済み"
+fi
 
 # PR 作成
 PR_BODY="## 概要
